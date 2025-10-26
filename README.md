@@ -1,2 +1,9 @@
 # DeltaZor
-Zero alloc + XOR delta compression with arithmetic detection. Use for real time sync, games, high frequency, etc
+
+[CSharp | Zig]
+
+Zero-allocation, SIMD-accelerated, adaptive binary deltas with RLE+XOR, arithmetic, and planar intelligence.
+
+
+
+

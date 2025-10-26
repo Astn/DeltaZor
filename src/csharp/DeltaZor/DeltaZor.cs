@@ -49,7 +49,7 @@ public static class DeltaZor
         /// Minimum compression ratio required to use RLE (0.0 = always use RLE, 1.0 = never use RLE).
         /// Default is 0.5 (50% size reduction required).
         /// </summary>
-        public double CompressionThreshold { get; set; } = 0.5;
+        public double CompressionThreshold { get; set; } = 0.95;
 
         /// <summary>
         /// Whether to include checksum for corruption detection.
@@ -291,9 +291,11 @@ public static class DeltaZor
         var writer = new ArrayBufferWriter<byte>();
 
         // Determine compression strategy
+        // todo, this should be an escape hatch for when the RLE delta is too large, if we bail out before we really know
+        // then that's a good thing, because we can't use RLE.
         bool useRLE = ShouldUseRLE(oldData, newData, options);
 
-        if (useRLE)
+        if (true)
         {
             // Create RLE delta
             CreateRLEDelta(oldData, newData, writer, options);
@@ -432,7 +434,7 @@ public static class DeltaZor
 
     #region Private Implementation
 
-    private static DeltaOptions DefaultOptions => new() { UseSIMD = false };
+    private static DeltaOptions DefaultOptions => new() { UseSIMD = true };
 
     private static int EstimateDeltaSize(int oldLength, int newLength, DeltaOptions options)
     {
