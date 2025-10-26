@@ -20,6 +20,7 @@
     </ItemGroup>
 
     <ItemGroup>
+      <ProjectReference Include="..\DeltaZor.Shared\DeltaZor.Shared.csproj" />
       <ProjectReference Include="..\DeltaZor\DeltaZor.csproj" />
     </ItemGroup>
 

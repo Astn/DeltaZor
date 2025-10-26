@@ -10,6 +10,7 @@ using DZ.TestGen;
 using DZ.TestGen.TestCases;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
+using DZ.Shared;
 
 var tests = new ITestCase[]
 {
@@ -44,7 +45,7 @@ var tests = new ITestCase[]
     new Test029_UDP512_NonZeroRun()
 };
 
-var manifest = new List<object>();
+var manifest = new List<ManifestEntry>();
 var outDir = Path.Combine(AppContext.BaseDirectory, "testdata");
 Directory.CreateDirectory(outDir);
 
@@ -138,45 +139,69 @@ foreach (var t in tests)
 
     File.WriteAllText(mdPath, md.ToString());
     
-    var entry = new
+    var entry = new ManifestEntry
     {
-        id = t.Id.ToString("000"),
-        name = t.Name,
-        prev = Path.GetFileName(prevPath),
-        next = Path.GetFileName(nextPath),
-        delta = Path.GetFileName(deltaPath),
-        size_prev = initial.Length,
-        size_next = next.Length,
-        change_density = 1.0 - (initial.Span.SequenceEqual(next.Span) ? 1.0 : 0.0),
-        sha256_prev = ComputeSha256(prevPath),
-        sha256_next = ComputeSha256(nextPath),
-        sha256_delta = ComputeSha256(deltaPath),
-        expected_delta_size = t.ExpectedDeltaSize,
-        tags = t.Tags,
-        description = t.Description
+        TestId = t.Id,
+        Name = t.Name.Replace("_", " "),
+        Description = t.Description,
+        BaseFile = Path.GetFileName(prevPath),
+        NextFile = Path.GetFileName(nextPath),
+        DeltaFile = Path.GetFileName(deltaPath),
+        BaseSize = initial.Length,
+        NextSize = next.Length,
+        DeltaSize = written,
+        BaseChecksum = ComputeSha256(prevPath),
+        NextChecksum = ComputeSha256(nextPath),
+        DeltaChecksum = ComputeSha256(deltaPath),
+        Tags = t.Tags,
+        Category = DetermineCategory(t.Tags),
+        CompressionRatio = next.Length > 0 ? (double)written / next.Length : 0.0,
+        GeneratedAt = DateTime.UtcNow,
+        Version = "1.0"
     };
 
     manifest.Add(entry);
 }
 
+// Create manifest with metadata
+var manifestData = new TestDataManifest
+{
+    Version = "1.0",
+    GeneratedAt = DateTime.UtcNow,
+    TotalTests = manifest.Count,
+    TotalSize = manifest.Sum(t => t.BaseSize + t.NextSize + t.DeltaSize),
+    Tests = manifest,
+    Checksum = "" // Will compute later if needed
+};
+
 // Write manifest
 File.WriteAllText(
     Path.Combine(outDir, "manifest.json"),
-    JsonSerializer.Serialize(new { version = "1.0", tests = manifest }, new JsonSerializerOptions { WriteIndented = true })
+    JsonSerializer.Serialize(manifestData, new JsonSerializerOptions { WriteIndented = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase })
 );
 
 // Write checksums
 var checksums = manifest
-    .Cast<dynamic>()
     .SelectMany(m => new[]
     {
-        $"SHA256({m.prev})= {m.sha256_prev}",
-        $"SHA256({m.next})= {m.sha256_next}",
-        $"SHA256({m.delta})= {m.sha256_delta}"
+        $"SHA256({m.BaseFile})= {m.BaseChecksum}",
+        $"SHA256({m.NextFile})= {m.NextChecksum}",
+        $"SHA256({m.DeltaFile})= {m.DeltaChecksum}"
     });
 File.WriteAllLines(Path.Combine(outDir, "checksums.txt"), checksums);
 
 Console.WriteLine($"Generated {tests.Length} test cases in {outDir}");
+
+static string DetermineCategory(string[] tags)
+{
+    if (tags.Contains("random")) return "Random";
+    if (tags.Contains("sparse")) return "Sparse";
+    if (tags.Contains("mixed")) return "Mixed";
+    if (tags.Contains("rle-ideal")) return "RleIdeal";
+    if (tags.Contains("udp")) return "UDP";
+    if (tags.Contains("large")) return "Large";
+    return "Other";
+}
 
 static string ComputeSha256(string path)
 {
