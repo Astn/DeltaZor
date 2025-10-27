@@ -134,7 +134,7 @@ namespace DZ.Tests
             Span<byte> oldData = GetNextRandomSpan();
             Span<byte> newData = GetNextRandomSpan();
             Span<byte> output = AllocateOutputSpan(2048);
-            bool success = DeltaZor.CreateDelta(oldData, newData, output, out int bytesWritten, _defaultOptions);
+            bool success = DeltaZor.CreateDelta(oldData, newData, output, out int bytesWritten, _defaultOptions, out var stats);
             return bytesWritten; // Return size for validation
         }
 
@@ -144,7 +144,7 @@ namespace DZ.Tests
             Span<byte> oldData = GetNextRandomSpan();
             Span<byte> identical = oldData; // Use the same data for identical case
             Span<byte> output = AllocateOutputSpan(2048);
-            bool success = DeltaZor.CreateDelta(oldData, identical, output, out int bytesWritten, _defaultOptions);
+            bool success = DeltaZor.CreateDelta(oldData, identical, output, out int bytesWritten, _defaultOptions, out var stats);
             return bytesWritten;
         }
 
@@ -154,7 +154,7 @@ namespace DZ.Tests
             Span<byte> oldData = GetNextRandomSpan();
             Span<byte> mixed = GetNextMixedSpan();
             Span<byte> output = AllocateOutputSpan(2048);
-            bool success = DeltaZor.CreateDelta(oldData, mixed, output, out int bytesWritten, _defaultOptions);
+            bool success = DeltaZor.CreateDelta(oldData, mixed, output, out int bytesWritten, _defaultOptions, out var stats);
             return bytesWritten;
         }
 
@@ -164,7 +164,7 @@ namespace DZ.Tests
             Span<byte> oldData = GetNextRandomSpan();
             Span<byte> sparse = GetNextSparseSpan();
             Span<byte> output = AllocateOutputSpan(2048);
-            bool success = DeltaZor.CreateDelta(oldData, sparse, output, out int bytesWritten, _defaultOptions);
+            bool success = DeltaZor.CreateDelta(oldData, sparse, output, out int bytesWritten, _defaultOptions, out var stats);
             return bytesWritten;
         }
 
@@ -174,7 +174,7 @@ namespace DZ.Tests
             Span<byte> oldData = GetNextRandomSpan();
             Span<byte> newData = GetNextRandomSpan();
             Span<byte> output = AllocateOutputSpan(20 * 1024);
-            bool success = DeltaZor.CreateDelta(oldData, newData, output, out int bytesWritten, _defaultOptions);
+            bool success = DeltaZor.CreateDelta(oldData, newData, output, out int bytesWritten, _defaultOptions, out var stats);
             return bytesWritten;
         }
 
@@ -184,7 +184,7 @@ namespace DZ.Tests
             Span<byte> oldData = GetNextRandomSpan();
             Span<byte> mixed = GetNextMixedSpan();
             Span<byte> output = AllocateOutputSpan(20 * 1024);
-            bool success = DeltaZor.CreateDelta(oldData, mixed, output, out int bytesWritten, _defaultOptions);
+            bool success = DeltaZor.CreateDelta(oldData, mixed, output, out int bytesWritten, _defaultOptions, out var stats);
             return bytesWritten;
         }
 
@@ -194,7 +194,7 @@ namespace DZ.Tests
             Span<byte> oldData = GetNextRandomSpan();
             Span<byte> sparse = GetNextSparseSpan();
             Span<byte> output = AllocateOutputSpan(20 * 1024);
-            bool success = DeltaZor.CreateDelta(oldData, sparse, output, out int bytesWritten, _defaultOptions);
+            bool success = DeltaZor.CreateDelta(oldData, sparse, output, out int bytesWritten, _defaultOptions, out var stats);
             return bytesWritten;
         }
 
@@ -204,7 +204,7 @@ namespace DZ.Tests
             Span<byte> oldData = GetNextRandomSpan();
             Span<byte> newData = GetNextRandomSpan();
             Span<byte> output = AllocateOutputSpan(200 * 1024);
-            bool success = DeltaZor.CreateDelta(oldData, newData, output, out int bytesWritten, _defaultOptions);
+            bool success = DeltaZor.CreateDelta(oldData, newData, output, out int bytesWritten, _defaultOptions, out var stats);
             return bytesWritten;
         }
 
@@ -217,7 +217,7 @@ namespace DZ.Tests
             Span<byte> additionalData = GetNextRandomSpan();
             additionalData.CopyTo(extended.Slice(1024, 1024));
             Span<byte> output = AllocateOutputSpan(4096);
-            bool success = DeltaZor.CreateDelta(oldData, extended, output, out int bytesWritten, _defaultOptions);
+            bool success = DeltaZor.CreateDelta(oldData, extended, output, out int bytesWritten, _defaultOptions, out var stats);
             return bytesWritten;
         }
 
@@ -231,7 +231,7 @@ namespace DZ.Tests
             Span<byte> oldData = GetNextRandomSpan();
             Span<byte> newData = GetNextRandomSpan();
             Span<byte> delta = AllocateOutputSpan(2048);
-            DeltaZor.CreateDelta(oldData, newData, delta, out int deltaSize, _defaultOptions);
+            DeltaZor.CreateDelta(oldData, newData, delta, out int deltaSize, _defaultOptions, out var stats);
             Span<byte> output = AllocateOutputSpan(1024);
             var result = DeltaZor.ApplyDelta(oldData, delta.Slice(0, deltaSize), output, out _);
             return result.Value;
@@ -243,7 +243,7 @@ namespace DZ.Tests
             Span<byte> oldData = GetNextRandomSpan();
             Span<byte> identical = oldData; // Use the same data for identical case
             Span<byte> delta = AllocateOutputSpan(2048);
-            DeltaZor.CreateDelta(oldData, identical, delta, out int deltaSize, _defaultOptions);
+            DeltaZor.CreateDelta(oldData, identical, delta, out int deltaSize, _defaultOptions, out var stats);
             Span<byte> output = AllocateOutputSpan(1024);
             var result = DeltaZor.ApplyDelta(oldData, delta.Slice(0, deltaSize), output, out _);
             return result.Value;
@@ -255,7 +255,7 @@ namespace DZ.Tests
             Span<byte> oldData = GetNextRandomSpan();
             Span<byte> mixed = GetNextMixedSpan();
             Span<byte> delta = AllocateOutputSpan(2048);
-            DeltaZor.CreateDelta(oldData, mixed, delta, out int deltaSize, _defaultOptions);
+            DeltaZor.CreateDelta(oldData, mixed, delta, out int deltaSize, _defaultOptions, out var stats);
             Span<byte> output = AllocateOutputSpan(1024);
             var result = DeltaZor.ApplyDelta(oldData, delta.Slice(0, deltaSize), output, out _);
             return result.Value;
@@ -267,7 +267,7 @@ namespace DZ.Tests
             Span<byte> oldData = GetNextRandomSpan();
             Span<byte> sparse = GetNextSparseSpan();
             Span<byte> delta = AllocateOutputSpan(2048);
-            DeltaZor.CreateDelta(oldData, sparse, delta, out int deltaSize, _defaultOptions);
+            DeltaZor.CreateDelta(oldData, sparse, delta, out int deltaSize, _defaultOptions, out var stats);
             Span<byte> output = AllocateOutputSpan(1024);
             var result = DeltaZor.ApplyDelta(oldData, delta.Slice(0, deltaSize), output, out _);
             return result.Value;
@@ -279,7 +279,7 @@ namespace DZ.Tests
             Span<byte> oldData = GetNextRandomSpan();
             Span<byte> newData = GetNextRandomSpan();
             Span<byte> delta = AllocateOutputSpan(20 * 1024);
-            DeltaZor.CreateDelta(oldData, newData, delta, out int deltaSize, _defaultOptions);
+            DeltaZor.CreateDelta(oldData, newData, delta, out int deltaSize, _defaultOptions, out var stats);
             Span<byte> output = AllocateOutputSpan(10 * 1024);
             var result = DeltaZor.ApplyDelta(oldData, delta.Slice(0, deltaSize), output, out _);
             return result.Value;
@@ -291,7 +291,7 @@ namespace DZ.Tests
             Span<byte> oldData = GetNextRandomSpan();
             Span<byte> mixed = GetNextMixedSpan();
             Span<byte> delta = AllocateOutputSpan(20 * 1024);
-            DeltaZor.CreateDelta(oldData, mixed, delta, out int deltaSize, _defaultOptions);
+            DeltaZor.CreateDelta(oldData, mixed, delta, out int deltaSize, _defaultOptions, out var stats);
             Span<byte> output = AllocateOutputSpan(10 * 1024);
             var result = DeltaZor.ApplyDelta(oldData, delta.Slice(0, deltaSize), output, out _);
             return result.Value;
@@ -303,7 +303,7 @@ namespace DZ.Tests
             Span<byte> oldData = GetNextRandomSpan();
             Span<byte> sparse = GetNextSparseSpan();
             Span<byte> delta = AllocateOutputSpan(20 * 1024);
-            DeltaZor.CreateDelta(oldData, sparse, delta, out int deltaSize, _defaultOptions);
+            DeltaZor.CreateDelta(oldData, sparse, delta, out int deltaSize, _defaultOptions, out var stats);
             Span<byte> output = AllocateOutputSpan(10 * 1024);
             var result = DeltaZor.ApplyDelta(oldData, delta.Slice(0, deltaSize), output, out _);
             return result.Value;
@@ -315,7 +315,7 @@ namespace DZ.Tests
             Span<byte> oldData = GetNextRandomSpan();
             Span<byte> newData = GetNextRandomSpan();
             Span<byte> delta = AllocateOutputSpan(200 * 1024);
-            DeltaZor.CreateDelta(oldData, newData, delta, out int deltaSize, _defaultOptions);
+            DeltaZor.CreateDelta(oldData, newData, delta, out int deltaSize, _defaultOptions, out var stats);
             Span<byte> output = AllocateOutputSpan(100 * 1024);
             var result = DeltaZor.ApplyDelta(oldData, delta.Slice(0, deltaSize), output, out _);
             return result.Value;
@@ -330,7 +330,7 @@ namespace DZ.Tests
             Span<byte> additionalData = GetNextRandomSpan();
             additionalData.CopyTo(extended.Slice(1024, 1024));
             Span<byte> delta = AllocateOutputSpan(4096);
-            DeltaZor.CreateDelta(oldData, extended, delta, out int deltaSize, _defaultOptions);
+            DeltaZor.CreateDelta(oldData, extended, delta, out int deltaSize, _defaultOptions, out var stats);
             Span<byte> output = AllocateOutputSpan(2048);
             var result = DeltaZor.ApplyDelta(oldData, delta.Slice(0, deltaSize), output, out _);
             return result.Value;
@@ -346,7 +346,7 @@ namespace DZ.Tests
             Span<byte> oldData = GetNextRandomSpan();
             Span<byte> newData = GetNextRandomSpan();
             Span<byte> delta = AllocateOutputSpan(2048);
-            DeltaZor.CreateDelta(oldData, newData, delta, out int deltaSize, _defaultOptions);
+            DeltaZor.CreateDelta(oldData, newData, delta, out int deltaSize, _defaultOptions, out var stats);
             Span<byte> output = AllocateOutputSpan(1024);
             var result = DeltaZor.ApplyDelta(oldData, delta.Slice(0, deltaSize), output, out _);
             return result.Value;
@@ -358,7 +358,7 @@ namespace DZ.Tests
             Span<byte> oldData = GetNextRandomSpan();
             Span<byte> identical = oldData; // Use the same data for identical case
             Span<byte> delta = AllocateOutputSpan(2048);
-            DeltaZor.CreateDelta(oldData, identical, delta, out int deltaSize, _defaultOptions);
+            DeltaZor.CreateDelta(oldData, identical, delta, out int deltaSize, _defaultOptions, out var stats);
             Span<byte> output = AllocateOutputSpan(1024);
             var result = DeltaZor.ApplyDelta(oldData, delta.Slice(0, deltaSize), output, out _);
             return result.Value;
@@ -370,7 +370,7 @@ namespace DZ.Tests
             Span<byte> oldData = GetNextRandomSpan();
             Span<byte> mixed = GetNextMixedSpan();
             Span<byte> delta = AllocateOutputSpan(2048);
-            DeltaZor.CreateDelta(oldData, mixed, delta, out int deltaSize, _defaultOptions);
+            DeltaZor.CreateDelta(oldData, mixed, delta, out int deltaSize, _defaultOptions, out var stats);
             Span<byte> output = AllocateOutputSpan(1024);
             var result = DeltaZor.ApplyDelta(oldData, delta.Slice(0, deltaSize), output, out _);
             return result.Value;
@@ -382,7 +382,7 @@ namespace DZ.Tests
             Span<byte> oldData = GetNextRandomSpan();
             Span<byte> newData = GetNextRandomSpan();
             Span<byte> delta = AllocateOutputSpan(20 * 1024);
-            DeltaZor.CreateDelta(oldData, newData, delta, out int deltaSize, _defaultOptions);
+            DeltaZor.CreateDelta(oldData, newData, delta, out int deltaSize, _defaultOptions, out var stats);
             Span<byte> output = AllocateOutputSpan(10 * 1024);
             var result = DeltaZor.ApplyDelta(oldData, delta.Slice(0, deltaSize), output, out _);
             return result.Value;
@@ -394,7 +394,7 @@ namespace DZ.Tests
             Span<byte> oldData = GetNextRandomSpan();
             Span<byte> sparse = GetNextSparseSpan();
             Span<byte> delta = AllocateOutputSpan(20 * 1024);
-            DeltaZor.CreateDelta(oldData, sparse, delta, out int deltaSize, _defaultOptions);
+            DeltaZor.CreateDelta(oldData, sparse, delta, out int deltaSize, _defaultOptions, out var stats);
             Span<byte> output = AllocateOutputSpan(10 * 1024);
             var result = DeltaZor.ApplyDelta(oldData, delta.Slice(0, deltaSize), output, out _);
             return result.Value;
@@ -406,7 +406,7 @@ namespace DZ.Tests
             Span<byte> oldData = GetNextRandomSpan();
             Span<byte> newData = GetNextRandomSpan();
             Span<byte> delta = AllocateOutputSpan(200 * 1024);
-            DeltaZor.CreateDelta(oldData, newData, delta, out int deltaSize, _defaultOptions);
+            DeltaZor.CreateDelta(oldData, newData, delta, out int deltaSize, _defaultOptions, out var stats);
             Span<byte> output = AllocateOutputSpan(100 * 1024);
             var result = DeltaZor.ApplyDelta(oldData, delta.Slice(0, deltaSize), output, out _);
             return result.Value;
@@ -455,7 +455,7 @@ namespace DZ.Tests
             Span<byte> oldData = GetNextRandomSpan();
             Span<byte> newData = GetNextRandomSpan();
             Span<byte> output = AllocateOutputSpan(2048);
-            bool success = DeltaZor.CreateDelta(oldData, newData, output, out int bytesWritten, options);
+            bool success = DeltaZor.CreateDelta(oldData, newData, output, out int bytesWritten, options, out var stats);
             return bytesWritten;
         }
 
@@ -470,7 +470,7 @@ namespace DZ.Tests
             Span<byte> oldData = GetNextRandomSpan();
             Span<byte> sparse = GetNextSparseSpan();
             Span<byte> output = AllocateOutputSpan(2048);
-            bool success = DeltaZor.CreateDelta(oldData, sparse, output, out int bytesWritten, options);
+            bool success = DeltaZor.CreateDelta(oldData, sparse, output, out int bytesWritten, options, out var stats);
             return bytesWritten;
         }
 
@@ -484,7 +484,7 @@ namespace DZ.Tests
             Span<byte> oldComponent = GetNextRandomSpan().Slice(0, 81);
             Span<byte> newComponent = GetNextMixedSpan().Slice(0, 81);
             Span<byte> output = AllocateOutputSpan(162);
-            bool success = DeltaZor.CreateDelta(oldComponent, newComponent, output, out int bytesWritten, _defaultOptions);
+            bool success = DeltaZor.CreateDelta(oldComponent, newComponent, output, out int bytesWritten, _defaultOptions, out var stats);
             return bytesWritten;
         }
 
@@ -494,7 +494,7 @@ namespace DZ.Tests
             Span<byte> oldTile = GetNextRandomSpan();
             Span<byte> newTile = GetNextSparseSpan();
             Span<byte> output = AllocateOutputSpan(2048);
-            bool success = DeltaZor.CreateDelta(oldTile, newTile, output, out int bytesWritten, _defaultOptions);
+            bool success = DeltaZor.CreateDelta(oldTile, newTile, output, out int bytesWritten, _defaultOptions, out var stats);
             return bytesWritten;
         }
 
@@ -504,7 +504,7 @@ namespace DZ.Tests
             Span<byte> oldBatch = GetNextRandomSpan();
             Span<byte> newBatch = GetNextMixedSpan();
             Span<byte> output = AllocateOutputSpan(20 * 1024);
-            bool success = DeltaZor.CreateDelta(oldBatch, newBatch, output, out int bytesWritten, _defaultOptions);
+            bool success = DeltaZor.CreateDelta(oldBatch, newBatch, output, out int bytesWritten, _defaultOptions, out var stats);
             return bytesWritten;
         }
 

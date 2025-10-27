@@ -1,4 +1,4 @@
-﻿using System.Reflection;
+using System.Reflection;
 using System.Runtime.CompilerServices;
 using MemoryPack;
 using DZ;
@@ -65,9 +65,9 @@ foreach (var t in tests)
     File.WriteAllBytes(nextPath, next.ToArray());
 
     // Generate delta
-    var delta = new byte[initial.Length * 2 + 20];
-    DeltaZor.CreateDelta(initial.Span, next.Span, delta, out int written);
-    File.WriteAllBytes(deltaPath, delta[..written]);
+    var options = new DeltaZor.DeltaOptions();
+    var delta = DeltaZor.CreateDelta(initial.Span, next.Span, options, out var stats);
+    File.WriteAllBytes(deltaPath, delta);
 
     // === Generate Markdown ===
     var md = new StringBuilder();
@@ -77,7 +77,7 @@ foreach (var t in tests)
     md.AppendLine();
     md.AppendLine($"**Sizes:** initial: `{initial.Length}`, increment: `{next.Length}` bytes");
     md.AppendLine();
-    md.AppendLine($"**DeltaZor:**  `{written}` bytes");
+    md.AppendLine($"**DeltaZor:**  `{delta.Length}` bytes");
     md.AppendLine();
 
     // Class comment
@@ -113,7 +113,7 @@ foreach (var t in tests)
         md.AppendLine(HexDumpDiff(next.Span, initial.Span));
         md.AppendLine("</code></pre></td>");
         md.AppendLine("<td><pre><code class=\"language-hex\">");
-        md.AppendLine(HexDump(delta.AsSpan(0..written)));
+        md.AppendLine(HexDump(delta.AsSpan()));
         md.AppendLine("</code></pre></td>");
     }
     else
@@ -149,13 +149,13 @@ foreach (var t in tests)
         DeltaFile = Path.GetFileName(deltaPath),
         BaseSize = initial.Length,
         NextSize = next.Length,
-        DeltaSize = written,
+        DeltaSize = delta.Length,
         BaseChecksum = ComputeSha256(prevPath),
         NextChecksum = ComputeSha256(nextPath),
         DeltaChecksum = ComputeSha256(deltaPath),
         Tags = t.Tags,
         Category = DetermineCategory(t.Tags),
-        CompressionRatio = next.Length > 0 ? (double)written / next.Length : 0.0,
+        CompressionRatio = next.Length > 0 ? (double)delta.Length / next.Length : 0.0,
         GeneratedAt = DateTime.UtcNow,
         Version = "1.0"
     };

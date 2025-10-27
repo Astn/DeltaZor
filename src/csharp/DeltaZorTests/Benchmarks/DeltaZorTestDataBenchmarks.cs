@@ -220,7 +220,7 @@ static DeltaZorTestDataBenchmarks()
         // Estimate output size based on the larger of the two inputs plus some overhead
         int estimatedOutputSize = Math.Max(test.Prev.Length, test.Next.Length) + 1024;
         var outputSpan = GetOutputSpan(estimatedOutputSize);
-        DeltaZor.CreateDelta(test.Prev, test.Next, outputSpan, out int written);
+        DeltaZor.CreateDelta(test.Prev, test.Next, outputSpan, out int written, out var stats);
         return written;
     }
 
@@ -281,7 +281,7 @@ public int CompressRandomTests()
     var test = _testData[TestId]; // Still using TestId for now
     int estimatedOutputSize = Math.Max(test.Prev.Length, test.Next.Length) + 1024;
     var outputSpan = GetOutputSpan(estimatedOutputSize);
-    DeltaZor.CreateDelta(test.Prev, test.Next, outputSpan, out int written);
+    DeltaZor.CreateDelta(test.Prev, test.Next, outputSpan, out int written, out var stats);
     return written;
 }
 

@@ -11,7 +11,9 @@
     </PropertyGroup>
 
     <ItemGroup>
-        <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0"/>
+        <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+            <_Parameter1>DeltaZorTests</_Parameter1>
+        </AssemblyAttribute>
     </ItemGroup>
 
 </Project>

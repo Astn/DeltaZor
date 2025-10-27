@@ -1,4 +1,4 @@
-﻿namespace DZ;
+namespace DZ;
 
 using System.Buffers;
 using System.Numerics;
@@ -6,23 +6,35 @@ using System.Runtime.Intrinsics;
 
 
 
-/// <summary>
-/// High-performance delta compression using RLE-encoded XOR operations.
-/// Supports length changes, multiple compression strategies, and zero-allocation APIs.
-///
-/// Unified Header Format:
-/// [output_length:4][compression_type:1][data...][checksum:4]
-///
-/// Compression Types:
-/// 0x00 = RLE Delta (XOR-based with runs)
-/// 0x01 = Full Replace (raw data)
-///
-/// RLE Opcodes:
-/// 0x00 = Run of zeros (count:variable)
-/// 0x01 = Run of non-zeros (count:variable, data:count)
-/// 0x02 = Extension (count:variable, data:count) - append new bytes
-/// 0x03 = Truncation (new_length:4) - set final length
-/// </summary>
+    /// <summary>
+    /// High-performance delta compression using RLE-encoded XOR operations.
+    /// Supports length changes, multiple compression strategies, and zero-allocation APIs.
+    ///
+    /// Unified Header Format:
+    /// [output_length:4][compression_type:1][data...][checksum:4]
+    ///
+    /// Compression Types:
+    /// 0x00 = RLE Delta (XOR-based with runs)
+    /// 0x01 = Full Replace (raw data)
+    ///
+    /// RLE Opcodes Data Layout:
+    /// 0x00 = Zero Run
+    ///      Format: [opcode:1][count:7bit]
+    ///      Meaning: Run of count bytes that are identical (no change)
+    ///
+    /// 0x01 = Non-Zero Run  
+    ///      Format: [opcode:1][count:7bit][xor_data:count]
+    ///      Meaning: Run of count bytes with XOR differences, followed by count bytes of XOR data
+    ///
+    /// 0x02 = Extension
+    ///      Format: [opcode:1][count:7bit][extension_data:count]
+    ///      Meaning: Append count new bytes, followed by count bytes of extension data
+    ///
+    /// 0x03 = Truncation
+    ///      Format: [opcode:1][new_length:4]
+    ///      Meaning: Set final output length to new_length
+    /// Note: All counts use 7-bit variable length encoding where the MSB indicates continuation.
+    /// </summary>
 public static class DeltaZor
 {
     // Constants for header format
@@ -39,6 +51,7 @@ public static class DeltaZor
     private const byte RLE_NonZeroRun = 0x01;
     private const byte RLE_Extension = 0x02;
     private const byte RLE_Truncation = 0x03;
+    private const byte RLE_ChannelRun = 0x08;        // Channel-based run optimization
 
     /// <summary>
     /// Configuration options for delta compression behavior.
@@ -49,7 +62,7 @@ public static class DeltaZor
         /// Minimum compression ratio required to use RLE (0.0 = always use RLE, 1.0 = never use RLE).
         /// Default is 0.5 (50% size reduction required).
         /// </summary>
-        public double CompressionThreshold { get; set; } = 0.95;
+        public double CompressionThreshold { get; set; } = 0.5;
 
         /// <summary>
         /// Whether to include checksum for corruption detection.
@@ -94,6 +107,38 @@ public static class DeltaZor
         public double ChangeDensity { get; init; }
         public string CompressionType { get; init; }
         public bool UsedRLE { get; init; }
+        public PatternCounts PatternCounts { get; init; }
+    }
+
+    /// <summary>
+    /// Represents a detected channel pattern for optimization.
+    /// </summary>
+    internal readonly struct ChannelPattern
+    {
+        public int Channels { get; init; }
+        public byte ChannelMask { get; init; }
+        public int ChangedChannels { get; init; }
+        public double CompressionSavings { get; init; }
+        public bool IsBeneficial { get; init; }
+        
+        public static ChannelPattern None => new() { IsBeneficial = false };
+    }
+
+    /// <summary>
+    /// Counts of different opcodes emitted during delta creation.
+    /// </summary>
+    public readonly struct PatternCounts
+    {
+        public int ZeroRunCount { get; init; }        // RLE_ZeroRun (0x00)
+        public int NonZeroRunCount { get; init; }     // RLE_NonZeroRun (0x01)
+        public int ExtensionCount { get; init; }      // RLE_Extension (0x02)
+        public int TruncationCount { get; init; }     // RLE_Truncation (0x03)
+        public int ChannelRunCount { get; init; }     // RLE_ChannelRun (0x08)
+        public int TotalPatternCount => ZeroRunCount + NonZeroRunCount + ExtensionCount + TruncationCount + ChannelRunCount;
+        
+        // For future specialized pattern detection
+        public int FloatPatternCount { get; init; }
+        public int HalfPatternCount { get; init; }
     }
 
     #region SIMD Helpers
@@ -239,15 +284,15 @@ public static class DeltaZor
     /// <summary>
     /// Creates a delta between old and new data using spans for zero allocations.
     /// </summary>
-    public static byte[] CreateDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData)
+    public static byte[] CreateDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData, out DeltaStats stats)
     {
-        return CreateDelta(oldData, newData, DefaultOptions);
+        return CreateDelta(oldData, newData, DefaultOptions, out stats);
     }
 
     /// <summary>
     /// Creates a delta between old and new data using spans with custom options.
     /// </summary>
-    public static byte[] CreateDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData, DeltaOptions options)
+    public static byte[] CreateDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData, DeltaOptions options, out DeltaStats stats)
     {
         ArgumentNullException.ThrowIfNull(options);
 
@@ -255,7 +300,7 @@ public static class DeltaZor
         int estimatedSize = EstimateDeltaSize(oldData.Length, newData.Length, options);
         byte[] buffer = new byte[estimatedSize];
 
-        if (CreateDelta(oldData, newData, buffer.AsSpan(), out int bytesWritten, options))
+        if (CreateDelta(oldData, newData, buffer.AsSpan(), out int bytesWritten, options, out stats))
         {
             // Success - return correctly sized array
             Array.Resize(ref buffer, bytesWritten);
@@ -265,7 +310,7 @@ public static class DeltaZor
         {
             // Buffer too small - resize and retry
             buffer = new byte[bytesWritten];
-            CreateDelta(oldData, newData, buffer.AsSpan(), out _, options);
+            CreateDelta(oldData, newData, buffer.AsSpan(), out _, options, out stats);
             return buffer;
         }
     }
@@ -274,17 +319,18 @@ public static class DeltaZor
     /// Creates a delta directly into a span buffer.
     /// Returns true if successful, false if buffer too small (bytesWritten contains required size).
     /// </summary>
-    public static bool CreateDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData, Span<byte> output, out int bytesWritten)
+    public static bool CreateDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData, Span<byte> output, out int bytesWritten, out DeltaStats stats)
     {
-        return CreateDelta(oldData, newData, output, out bytesWritten, DefaultOptions);
+        return CreateDelta(oldData, newData, output, out bytesWritten, DefaultOptions, out stats);
     }
 
     /// <summary>
     /// Creates a delta directly into a span buffer with custom options.
     /// Returns true if successful, false if buffer too small (bytesWritten contains required size).
     /// </summary>
-    public static bool CreateDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData, Span<byte> output, out int bytesWritten, DeltaOptions options)
+    public static bool CreateDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData, Span<byte> output, out int bytesWritten, DeltaOptions options, out DeltaStats stats)
     {
+        stats = default;
         ArgumentNullException.ThrowIfNull(options);
 
         // Use ArrayBufferWriter for efficient writing - write data first, then prefix header
@@ -294,11 +340,12 @@ public static class DeltaZor
         // todo, this should be an escape hatch for when the RLE delta is too large, if we bail out before we really know
         // then that's a good thing, because we can't use RLE.
         bool useRLE = ShouldUseRLE(oldData, newData, options);
+        var patternCounts = default(PatternCounts);
 
-        if (true)
+        if (useRLE)
         {
             // Create RLE delta
-            CreateRLEDelta(oldData, newData, writer, options);
+            patternCounts = CreateRLEDelta(oldData, newData, writer, options);
         }
         else
         {
@@ -329,6 +376,19 @@ public static class DeltaZor
         checksumBytes.CopyTo(output.Slice(HeaderSize + dataSize));
 
         bytesWritten = totalSize;
+
+        // Populate stats
+        stats = new DeltaStats
+        {
+            OldSize = oldData.Length,
+            NewSize = newData.Length,
+            DeltaSize = totalSize,
+            ChangeDensity = CalculateChangeDensity(oldData, newData),
+            CompressionType = useRLE ? "RLE" : "FullReplace",
+            UsedRLE = useRLE,
+            PatternCounts = patternCounts
+        };
+
         return true;
     }
 
@@ -434,7 +494,7 @@ public static class DeltaZor
 
     #region Private Implementation
 
-    private static DeltaOptions DefaultOptions => new() { UseSIMD = true };
+    private static DeltaOptions DefaultOptions => new() { UseSIMD = true, CompressionThreshold = 0.05 };
 
     private static int EstimateDeltaSize(int oldLength, int newLength, DeltaOptions options)
     {
@@ -445,19 +505,18 @@ public static class DeltaZor
 
     private static bool ShouldUseRLE(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData, DeltaOptions options)
     {
-        // For same length, check if RLE would be beneficial
-        if (oldData.Length == newData.Length)
-        {
-            // Estimate RLE size vs full replace
-            int rleEstimate = EstimateRLESize(oldData, newData);
-            int fullReplaceSize = newData.Length;
+        // Always estimate RLE size vs full replace for accurate decision
+        int rleEstimate = EstimateRLESize(oldData, newData);
+        int fullReplaceSize = newData.Length;
 
-            double ratio = (double)rleEstimate / fullReplaceSize;
-            return ratio <= (1.0 - options.CompressionThreshold);
-        }
+        double ratio = (double)rleEstimate / fullReplaceSize;
+        bool useRLE = ratio <= (1.0 - options.CompressionThreshold);
 
-        // For different lengths, RLE is usually better unless the difference is very small
-        return Math.Abs(oldData.Length - newData.Length) > 64; // Arbitrary threshold
+        // Bias toward RLE for very low change density (e.g., identical data)
+        if (CalculateChangeDensity(oldData, newData) < 0.05) // <5% changes
+            useRLE = true;
+
+        return useRLE;
     }
 
     private static int EstimateRLESize(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData)
@@ -496,45 +555,48 @@ public static class DeltaZor
         return size;
     }
 
-    private static void CreateRLEDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData, IBufferWriter<byte> writer, DeltaOptions options)
+    private static PatternCounts CreateRLEDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData, IBufferWriter<byte> writer, DeltaOptions options)
     {
+        var patternCounts = new PatternCounts();
         int minLength = Math.Min(oldData.Length, newData.Length);
         int i = 0;
 
         // Process overlapping region with RLE
-        while (i < minLength)
-        {
-            int runStart = i;
-            byte xor = (byte)(oldData[i] ^ newData[i]);
-
-            if (xor == 0)
+            while (i < minLength)
             {
+                int runStart = i;
+                byte xor = (byte)(oldData[i] ^ newData[i]);
+
+                if (xor == 0)
+                {
                 // Count zero run
-                while (i < minLength && (oldData[i] ^ newData[i]) == 0) i++;
-                WriteRLEOpcode(writer, RLE_ZeroRun, i - runStart);
-            }
-            else
-            {
+                    while (i < minLength && (oldData[i] ^ newData[i]) == 0) i++;
+                    WriteRLEOpcode(writer, RLE_ZeroRun, i - runStart);
+                    patternCounts = patternCounts with { ZeroRunCount = patternCounts.ZeroRunCount + 1 };
+    }
+else
+                {
                 // Count non-zero run
-                while (i < minLength && (oldData[i] ^ newData[i]) != 0) i++;
-                int runLength = i - runStart;
-                WriteRLEOpcode(writer, RLE_NonZeroRun, runLength);
+                    while (i < minLength && (oldData[i] ^ newData[i]) != 0) i++;
+                    int runLength = i - runStart;
+                                WriteRLEOpcode(writer, RLE_NonZeroRun, runLength);
+                                patternCounts = patternCounts with { NonZeroRunCount = patternCounts.NonZeroRunCount + 1 };
 
-                // Allocate temp buffer for XOR computation
-                IMemoryOwner<byte> owner = MemoryPool<byte>.Shared.Rent(runLength);
-                Span<byte> xorBuffer = owner.Memory.Span[..runLength];
+                        // Allocate temp buffer for XOR computation
+                        IMemoryOwner<byte> owner = MemoryPool<byte>.Shared.Rent(runLength);
+                        Span<byte> xorBuffer = owner.Memory.Span[..runLength];
 
-                try
-                {
-                    // Compute XOR using SIMD
-                    WriteXORDelta(oldData, newData, xorBuffer, runStart, runLength, options);
-                    writer.Write(xorBuffer);
-                }
-                finally
-                {
-                    owner.Dispose();
-                }
-            }
+                        try
+                        {
+                            // Compute XOR using SIMD
+                            WriteXORDelta(oldData, newData, xorBuffer, runStart, runLength, options);
+                            writer.Write(xorBuffer);
+                        }
+                        finally
+                        {
+                            owner.Dispose();
+                        }
+                    }
         }
 
         // Handle length differences
@@ -544,13 +606,16 @@ public static class DeltaZor
             ReadOnlySpan<byte> extension = newData[oldData.Length..];
             WriteRLEOpcode(writer, RLE_Extension, extension.Length);
             writer.Write(extension);
+            patternCounts = patternCounts with { ExtensionCount = patternCounts.ExtensionCount + 1 };
         }
         else if (newData.Length < oldData.Length)
         {
             // Truncation: set new length
             WriteRLEOpcode(writer, RLE_Truncation, newData.Length);
-            writer.Write(BitConverter.GetBytes(newData.Length));
+            patternCounts = patternCounts with { TruncationCount = patternCounts.TruncationCount + 1 };
         }
+
+        return patternCounts;
     }
 
     private static bool ApplyRLEDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> delta, Span<byte> output, DeltaOptions options)
@@ -565,7 +630,7 @@ public static class DeltaZor
 
         // Apply RLE operations
         var reader = new SpanReader(delta);
-        int pos = 0;
+        int pos = 0; // Start at beginning of overlapping region
 
         while (reader.Remaining > 0)
         {
@@ -577,73 +642,44 @@ public static class DeltaZor
                 case RLE_ZeroRun:
                     if (!reader.TryRead7BitEncodedInt(out int zeroCount))
                         return false;
-                    pos += zeroCount; // No change needed (already zeroed)
+                    // For zero run in overlapping, already copied, but if after copyLength, zero the area
+                    int endPos = Math.Min(pos + zeroCount, output.Length);
+                    output.Slice(pos, endPos - pos).Clear();
+                    pos = endPos;
                     break;
 
                 case RLE_NonZeroRun:
                     if (!reader.TryRead7BitEncodedInt(out int nonZeroCount))
                         return false;
-                    if (nonZeroCount >= options.SimdMinThreshold && UseSIMD(options))
-                    {
-                        // SIMD path: read XOR data as span and apply SIMD
-                        ReadOnlySpan<byte> xorData = reader._span.Slice(reader._position, nonZeroCount);
-                        reader._position += nonZeroCount;
-                        ApplyXORDelta(output, xorData, pos, nonZeroCount, options);
-                        pos += nonZeroCount;
-                    }
-                    else
-                    {
-                        // Scalar path
-                        for (int i = 0; i < nonZeroCount; i++)
-                        {
-                            if (!reader.TryReadByte(out byte xor))
-                                return false;
-                            if (pos + i >= output.Length)
-                                return false;
-                            output[pos + i] ^= xor;
-                        }
-                        pos += nonZeroCount;
-                    }
+                    if (pos + nonZeroCount > output.Length) return false;
+                    ReadOnlySpan<byte> xorData = reader.Read(nonZeroCount);
+                    ApplyXORDelta(output, xorData, pos, nonZeroCount, options);
+                    pos += nonZeroCount;
                     break;
 
                 case RLE_Extension:
-                    if (!reader.TryRead7BitEncodedInt(out int extensionCount))
+                    if (!reader.TryRead7BitEncodedInt(out int extLen))
                         return false;
-                    if (extensionCount >= options.SimdMinThreshold && UseSIMD(options))
-                    {
-                        // SIMD path: read extension data as span and copy SIMD
-                        ReadOnlySpan<byte> extensionData = reader._span.Slice(reader._position, extensionCount);
-                        reader._position += extensionCount;
-                        VectorCopy(extensionData, output.Slice(pos, extensionCount), extensionCount, options);
-                        pos += extensionCount;
-                    }
-                    else
-                    {
-                        // Scalar path
-                        for (int i = 0; i < extensionCount; i++)
-                        {
-                            if (!reader.TryReadByte(out byte data))
-                                return false;
-                            if (pos + i >= output.Length)
-                                return false;
-                            output[pos + i] = data;
-                        }
-                        pos += extensionCount;
-                    }
+                    if (pos + extLen > output.Length) return false;
+                    ReadOnlySpan<byte> extData = reader.Read(extLen);
+                    extData.CopyTo(output.Slice(pos, extLen));
+                    pos += extLen;
                     break;
 
                 case RLE_Truncation:
-                    if (!reader.TryReadInt32(out int newLength))
+                    if (!reader.TryRead7BitEncodedInt(out int truncLen))
                         return false;
-                    // Truncation is handled by output buffer size - no additional action needed
+                    // The output is already sized to truncLen from header
+                    // No data to copy, just ensure no more reading
+                    pos = truncLen;
                     break;
 
                 default:
-                    return false; // Unknown opcode
+                    return false; // Invalid opcode
             }
         }
 
-        return true;
+        return pos == output.Length;
     }
 
     // Removed unused WriteHeader - now inline in CreateDelta
@@ -751,6 +787,14 @@ public static class DeltaZor
             while ((b & 0x80) != 0);
 
             return true;
+        }
+
+        public ReadOnlySpan<byte> Read(int length)
+        {
+            if (_position + length > _span.Length) throw new EndOfStreamException("Insufficient data in delta");
+            var result = _span.Slice(_position, length);
+            _position += length;
+            return result;
         }
     }
 
