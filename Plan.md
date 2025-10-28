@@ -36,10 +36,11 @@
 - ✅ **Platform Stability**: Resolved ARM/x64 execution issues
 - ✅ **Pattern Counts Feature**: Added opcode tracking for diagnostic information
 - ✅ **Channel Pattern Detection**: Implemented automatic detection and optimization for channel-based data
+- ✅ **Motif Detection Refinement**: Completed lazy, single-accumulator motif detection with bit-packed SIMD vectors for variable UnitSizes 2-8, enabling single-pass variable-length probing at opcode boundaries with allocation-free stack operations and O(1) amortized cost per opcode.
 
 ## Current Focus
-- 🔄 **Float Data Testing**: Preparing height map examples with float32 and float16 data
-- 🔄 **Advanced Compression Modes**: Planning implementation of arithmetic compression features
+- 🔄 **Float Data Testing**: Preparing height map examples with float32 and float16 data, including motif integration for repeating patterns in scientific tensors
+- 🔄 **Advanced Compression Modes**: Planning implementation of arithmetic compression features, with motif nesting for hybrids
 - 🔄 **Tensor File Support**: Investigating format-specific optimizations for ML/Scientific data
 
 ---
@@ -56,8 +57,9 @@
 | 6 | **Hybrid Strategy** | Always optimal size | ✅ Fixed (`ShouldUseRLE` threshold) | `estimate_rle_size` |
 | 7 | **Full Replace** | Safe fallback | ✅ Complete (`CompressionType_FullReplace`) | `TYPE_FULL` |
 | 8 | **Unified Header** | Interop, versioning | ✅ Complete (`[len:4][type:1][data][crc:4]`) | Same binary layout |
-| 9 | **Channel Pattern Detection** | 50-75% savings for graphics/tensors | ✅ Complete (`RLE_ChannelRun`) | `OP_CHANNEL_RUN` |
-| 10 | **Pattern Counts** | Diagnostic opcode tracking | ✅ Complete (`PatternCounts`) | `pattern_counts.zig` |
+| 9 | **Channel Pattern Detection** | ... | ✅ Complete (`RLE_ChannelRun`) | `OP_CHANNEL_RUN` |
+| 9.1 | **Motif Repeat Detection (Refined)** | Sparse repeating patterns with variable UnitSizes 2-8 via lazy single-accumulator | ✅ Complete: Single MotifAccumulator with Vector256-packed rolling masks/hashes, lazy updates at opcode boundaries for allocation-free, SIMD-accelerated detection | `motif_accum.zig`: @Vector-packed state with inline bit ops for single-pass probing |
+| 10 | **Pattern Counts** | ... | ✅ Complete (`PatternCounts`) | `pattern_counts.zig` |
 
 ---
 
@@ -216,7 +218,7 @@ const ChannelPattern = struct {
 - **50% savings** when only 2 of 4 channels change
 - **Automatic**: No configuration needed
 - **Zero Risk**: Falls back to standard RLE when not beneficial
-- **Tensor Support**: Perfect for ML tensor data with feature channels
+- **Tensor Support**: Perfect for ML tensor data with feature channels; integrates with motif repeats for masked hybrids via flags
 
 ---
 
@@ -257,7 +259,7 @@ public readonly struct PatternCounts
 |---|--------|----------------|----|-----|
 | 11 | **Global Arithmetic** | `+5` on 1M ints → 8 B | ✅ In Progress (Float Detection) | `detect_global_shift` |
 | 12 | **Planar Arithmetic** | `R+10` on 1080p → 20 B | ✅ In Progress (Float Detection) | `planar_detect` |
-| 13 | **Per-Run Arithmetic** | Fill tool → 30 B | Planned | `try_run_arithmetic` |
+| 13 | **Per-Run Arithmetic** | Fill tool → 30 B; nestable with motifs for sparse runs | Planned (integrate with MotifAccumulator for hybrid detection) | `try_run_arithmetic` (with motif_accum hooks) |
 | 14 | **RunArithmetic Opcode** | Local uniform edits | Planned | `OP_ARITH_RUN` |
 | 15 | **Clamp-Aware** | `255+10=255` | Planned | `clamp_u8` |
 | 16 | **Auto-Mode** | Best of all | Planned | `select_best_mode` |
@@ -391,7 +393,7 @@ pub const Config = struct {
 |---------|-------|-----|
 | **v0.1** | C# Core (RLE+XOR, SIMD) | ✅ Complete |
 | **v0.2** | Zig Port (RLE+XOR) | +1 week |
-| **v0.3** | Arithmetic (Global + Planar) | +1 week |
+| **v0.3** | Arithmetic (Global + Planar); motif refinement with lazy single-accumulator detection | ✅ Complete (refinement done; +0 weeks) |
 | **v0.4** | RunArithmetic + Clamp | +1 week |
 | **v0.5** | Channel Runs + Pattern Counts | ✅ Complete |
 | **v0.6** | Auto-Mode + Interop Tests | +1 week |
@@ -417,3 +419,5 @@ pub const Config = struct {
 > **"DeltaZor: Go fast"**
 
 ---
+
+- October 28, 2025: Updated roadmap for chunk-vetoed, mask-based motifs; emphasized SIMD and allocation-free refinements; incorporated lazy single-accumulator detection for variable UnitSizes 2-8 with single-pass, opcode-bound updates.

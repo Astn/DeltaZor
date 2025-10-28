@@ -104,12 +104,74 @@ Size = 1 (opcode) + 1 (flags) + 1-5 (RepeatLength) + 1-5 (UnitSize) + 0-5 (Mask)
 
 ## Detection and Selection
 
-During delta creation, motifs are detected using forward accumulation with a stack-allocated ring buffer of recent runs. Compute a consistent mask via SIMD zero-test (e.g., _mm256_testz_si256). For each streak (>=2), estimate sizes:
+During delta creation, motifs are detected using a single, bit-packed `MotifAccumulator` integrated directly into the core RLE loop. This lazy approach maintains a packed state (e.g., Vector256<uint> for rolling masks and hashes across UnitSizes 2-8) and performs updates only at opcode boundaries, leveraging compile-time constants (e.g., UnitMods for fast modulo via bit-ands) to implicitly probe variable UnitSizes in a single-pass manner. Each update computes contrib_masks via bit-filling shifts (SIMD-accelerated with _mm256_or_si256 for batch OR across probes), accumulates sparsity in rolling masks, and verifies uniformity via rolling hashes (e.g., vectorized XOR/rotate). Inline voting selects the best probe based on lowest density (popcount(mask)/UnitSize <0.5 threshold) and highest estimated savings.
+
+For each streak (>=2), estimate sizes:
 
 - If masked mode < full mode, use masked.
-- Emit only if estimated size < original RLE bytes * 0.95 (>5% savings).
+- Emit only if estimated size < original RLE bytes * 0.95 (>5% savings), computed inline via Get7BitEncodedSize for varints + popcount * streak (varying) or popcount (uniform).
 
-Performance Safeguards: Cap UnitSize=32 and streak=50 (bound stack to DeltaOptions.MaxStackBufferSize). If density >50%, fallback to non-masked.
+Performance Safeguards: Cap UnitSize=8 (extensible to 32 with uint64 masks) and streak=50 (bound stack to DeltaOptions.MaxStackBufferSize). Prune high-density probes early (>50%) to fallback to non-masked or core RLE. All operations remain allocation-free (stackalloc for constants; no lists), with O(1) amortized cost per opcode via vectorized batching.
+
+### Pseudocode Sketches
+
+#### MotifAccumulator Struct
+```csharp
+private ref struct MotifAccumulator
+{
+    private const int ProbeCount = 7;  // UnitSizes 2-8
+    private static readonly uint[] UnitMods = {0x1, 0x3, 0x7, 0xF, 0x1F, 0x3F, 0x7F};  // For fast pos % UnitSize
+    private static readonly int[] UnitSizes = {2, 3, 4, 5, 6, 7, 8};
+
+    private Vector256<uint> RollingMasks;  // Packed per probe
+    private Vector256<uint> RollingHashes;
+    private Vector128<int> Streaks;        // Packed
+    private byte BestProbeIdx;             // 0-6
+    private bool IsActive;
+
+    public void Init() { /* Zero vectors */ }
+}
+```
+
+#### Update Method (Lazy, at Opcode Boundary)
+```csharp
+public void Update(ReadOnlySpan<byte> runData, int globalPos, bool isZero)
+{
+    if (isZero) {
+        // Advance pos only; optional hash rotate if needed
+        return;
+    }
+
+    Vector256<uint> contribMasks = ComputeContribMasks(runData, globalPos);  // Bit-fill shifts per probe (vectorized)
+    RollingMasks = Vector256.BitwiseOr(RollingMasks, contribMasks);
+    RollingHashes = UpdatePackedHashes(RollingHashes, runData);  // Vector XOR/rotate
+    Streaks = Vector128.Add(Streaks, Vector128<int>.One);       // Batch streak increment
+    PruneHighDensityProbes();  // Vector testz/mask out >0.5 density
+    UpdateBestIdx();           // Inline: min density / max savings
+}
+```
+
+#### Integration in RLE Loop
+```csharp
+MotifAccumulator acc;
+acc.Init();
+
+while (pos < xorData.Length) {
+    // Detect run...
+    acc.Update(runData, pos, isZeroRun);
+
+    if (acc.IsActive && acc.GetStreak(acc.BestProbeIdx) >= 2) {
+        int unitIdx = acc.BestProbeIdx;
+        if (EstimateSavings(acc.GetMask(unitIdx), acc.GetStreak(unitIdx), UnitSizes[unitIdx]) > 0.05) {
+            WriteMotifOpcode(writer, acc, unitIdx);
+            acc.Reset();
+            continue;
+        }
+    }
+
+    // Fallback RLE emission...
+}
+```
 
 ## Examples
 

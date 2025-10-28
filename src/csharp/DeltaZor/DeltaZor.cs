@@ -5,8 +5,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Numerics;
 using System.Runtime.Intrinsics;
-
-
+using System;
 
     /// <summary>
     /// High-performance delta compression using RLE-encoded XOR operations.
@@ -65,7 +64,15 @@ public static class DeltaZor
     private const byte RLE_ChannelRun = 0x08;       // Pending: Channel-optimized runs; [opcode:1][count:7bit][channels:1][mask:1][changed_data:variable].
     private const byte RLE_Arithmetic = 0x09;       // Pending: Arithmetic compression; [opcode:1][model_id:1][count:7bit][compressed_data:variable].
     private const byte RLE_Planar = 0x0A;           // Pending: Planar (e.g., color channel) compression; [opcode:1][plane_count:1][count:7bit][plane_data:variable].
-// Reserve 0x0B+ for future (e.g., Clamp-Aware, Global Shift).
+    // Reserve 0x0B+ for future (e.g., Clamp-Aware, Global Shift).
+
+    private const int MotifProbeCount = 7;  // UnitSizes 2-8
+    private static readonly int[] MotifUnitSizes = {2, 3, 4, 5, 6, 7, 8};
+    private static readonly uint[] MotifUnitMods = {0x1, 0x3, 0x7, 0xF, 0x1F, 0x3F, 0x7F};  // 2^n -1 for fast pos % size
+    private static readonly float MotifDensityThreshold = 0.5f;  // Prune if popcount(mask)/size >= this
+    private const float MotifSavingsThreshold = 0.05f;  // >5% smaller than core RLE
+    private const int MotifMinStreak = 2;  // Min repeats for emission
+    private const int MaxMotifStreak = 50; // Cap to bound stack
 
     /// <summary>
     /// Configuration options for delta compression behavior.
@@ -76,7 +83,7 @@ public static class DeltaZor
         /// Minimum compression ratio required to use RLE (0.0 = always use RLE, 1.0 = never use RLE).
         /// Default is 0.5 (50% size reduction required).
         /// </summary>
-        public double CompressionThreshold { get; set; } = 0.5;
+        public double CompressionThreshold { get; set; } = 0.05;
 
         /// <summary>
         /// Whether to include checksum for corruption detection.
@@ -107,6 +114,9 @@ public static class DeltaZor
         /// Whether to enable SIMD optimizations.
         /// </summary>
         public bool UseSIMD { get; set; } = true;
+
+        public bool EnableMotifDetection { get; set; } = true;
+        public int MotifMinRunThreshold { get; set; } = 32;  // Align with SimdMinThreshold
     }
 
     /// <summary>
@@ -124,6 +134,44 @@ public static class DeltaZor
         public PatternCounts PatternCounts { get; init; }
     }
 
+    private unsafe ref struct MotifAccumulator
+    {
+        public fixed uint RollingMasks[MotifProbeCount];
+        public fixed int Streaks[MotifProbeCount];
+        public byte BestProbeIdx;
+        public bool IsActive;
+        public int StartPos;
+
+        public static MotifAccumulator Init()
+        {
+            MotifAccumulator acc = default;
+            unsafe
+            {
+                for (int i = 0; i < MotifProbeCount; i++)
+                {
+                    acc.RollingMasks[i] = 0;
+                    acc.Streaks[i] = 0;
+                }
+            }
+            acc.BestProbeIdx = 255;
+            acc.IsActive = false;
+            acc.StartPos = -1;
+            return acc;
+        }
+
+        public unsafe uint GetMask(int probeIdx)
+        {
+            fixed (uint* p = RollingMasks)
+                return p[probeIdx];
+        }
+
+        public unsafe int GetStreak(int probeIdx)
+        {
+            fixed (int* p = Streaks)
+                return p[probeIdx];
+        }
+    }
+
     /// <summary>
     /// Represents a detected channel pattern for optimization.
     /// </summary>
@@ -134,90 +182,8 @@ public static class DeltaZor
         public int ChangedChannels { get; init; }
         public double CompressionSavings { get; init; }
         public bool IsBeneficial { get; init; }
-        
+
         public static ChannelPattern None => new() { IsBeneficial = false };
-    }
-
-    /// <summary>
-    /// Represents an active motif being detected during RLE creation.
-    /// </summary>
-    internal class ActiveMotif
-    {
-        public uint Mask { get; set; } = 0;
-        public byte[] FirstUnitXorData { get; set; } = Array.Empty<byte>();  // Packed for masked positions
-        public List<byte[]> AllUnitXorData { get; } = new(32);  // Packed per-unit; cap at 32 repeats
-        public int Streak { get; set; } = 1;  // Ongoing
-        public int StartOffset { get; set; } = -1;
-        public int UnitSize { get; set; } = 0;
-        public bool IsProvisional { get; set; } = true;
-        public bool Confirmed { get; set; } = false;
-        public bool CanBeUniform { get; set; } = true;  // Updated during verification
-
-        // Append/verify per unit (ongoing)
-        public void AppendOrVerifyUnit(byte[] newXorData)
-        {
-            if (AllUnitXorData.Count == 0)
-            {
-                // First unit
-                FirstUnitXorData = newXorData;  // Packed
-                AllUnitXorData.Add(newXorData);
-                CanBeUniform = true;
-            }
-            else
-            {
-                // Verify (mask already set by caller)
-                AllUnitXorData.Add(newXorData);  // Always append for varying fallback
-
-                // Check for uniform
-                if (CanBeUniform && !newXorData.SequenceEqual(FirstUnitXorData))
-                {
-                    CanBeUniform = false;  // Switch to varying mode
-                }
-            }
-            Streak++;
-            // UnitSize set by caller
-        }
-
-        // Compute for chosen opcode (called on confirmation)
-        public byte[] ComputeReplacementBytes(bool useUniform)
-        {
-            using var ms = new MemoryStream();
-            var writer = new BinaryWriter(ms);
-            byte opcode = useUniform ? RLE_UniformMotifRepeat : RLE_VaryingMotifRepeat;
-            writer.Write(opcode);
-            writer.Write((byte)0x80);  // Flags: masked mode
-            Write7BitEncodedInt(writer, Streak);  // e.g., 20
-            Write7BitEncodedInt(writer, UnitSize);  // e.g., 4
-            Write7BitEncodedInt(writer, (int)Mask);  // e.g., 0x02
-
-            // Opcode-specific data
-            if (useUniform)
-            {
-                writer.Write(FirstUnitXorData);
-            }
-            else
-            {
-                foreach (var unitData in AllUnitXorData)
-                {
-                    writer.Write(unitData);
-                }
-            }
-
-            return ms.ToArray();
-        }
-
-        // Choose best (size-based)
-        public (bool IsUniform, byte[] Bytes) GetBestReplacement()
-        {
-            bool useUniform = CanBeUniform;
-            // If not uniform, force varying
-            if (!CanBeUniform)
-            {
-                useUniform = false;
-            }
-            byte[] bytes = ComputeReplacementBytes(useUniform);
-            return (useUniform, bytes);
-        }
     }
 
     /// <summary>
@@ -233,7 +199,7 @@ public static class DeltaZor
         public int VaryingMotifCount { get; init; }   // 0x05 (Partial)
         public float AverageMaskDensity { get; init; } // Avg popcount(mask)/unitSize for motif sparsity
         public int TotalPatternCount => ZeroRunCount + NonZeroRunCount + ExtensionCount + TruncationCount + ChannelRunCount + UniformMotifCount + VaryingMotifCount;
-        
+
         // For future specialized pattern detection
         public int FloatPatternCount { get; init; }   // 0x06 (Planned)
         public int HalfPatternCount { get; init; }    // 0x07 (Planned)
@@ -322,13 +288,13 @@ public static class DeltaZor
             }
         }
         catch (Exception ex) when (ex is NotSupportedException || ex is PlatformNotSupportedException)
-        {
-            // Graceful fallback to scalar implementation
-            for (int i = 0; i < length; i++)
             {
-                output[pos + i] ^= xorData[i];
+                // Graceful fallback to scalar implementation
+                for (int i = 0; i < length; i++)
+                {
+                    output[pos + i] ^= xorData[i];
+                }
             }
-        }
     }
 
     private static unsafe void VectorCopy(ReadOnlySpan<byte> source, Span<byte> dest, int length, DeltaOptions options)
@@ -355,10 +321,10 @@ public static class DeltaZor
             source.Slice(vectorCount * 16, remainder).CopyTo(dest.Slice(vectorCount * 16, remainder));
         }
         catch (Exception ex) when (ex is NotSupportedException || ex is PlatformNotSupportedException)
-        {
-            // Graceful fallback to scalar implementation
-            source.CopyTo(dest);
-        }
+            {
+                // Graceful fallback to scalar implementation
+                source.CopyTo(dest);
+            }
     }
 
     #endregion
@@ -376,21 +342,13 @@ public static class DeltaZor
         public static DeltaResult<T> Fail(string error) => new() { Success = false, Error = error };
     }
 
-    
-
     #region Public API - Span-based (high performance)
 
-    /// <summary>
-    /// Creates a delta between old and new data using spans for zero allocations.
-    /// </summary>
     public static byte[] CreateDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData, out DeltaStats stats)
     {
         return CreateDelta(oldData, newData, DefaultOptions, out stats);
     }
 
-    /// <summary>
-    /// Creates a delta between old and new data using spans with custom options.
-    /// </summary>
     public static byte[] CreateDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData, DeltaOptions options, out DeltaStats stats)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -414,19 +372,11 @@ public static class DeltaZor
         }
     }
 
-    /// <summary>
-    /// Creates a delta directly into a span buffer.
-    /// Returns true if successful, false if buffer too small (bytesWritten contains required size).
-    /// </summary>
     public static bool CreateDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData, Span<byte> output, out int bytesWritten, out DeltaStats stats)
     {
         return CreateDelta(oldData, newData, output, out bytesWritten, DefaultOptions, out stats);
     }
 
-    /// <summary>
-    /// Creates a delta directly into a span buffer with custom options.
-    /// Returns true if successful, false if buffer too small (bytesWritten contains required size).
-    /// </summary>
     public static bool CreateDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData, Span<byte> output, out int bytesWritten, DeltaOptions options, out DeltaStats stats)
     {
         stats = default;
@@ -436,8 +386,6 @@ public static class DeltaZor
         var writer = new ArrayBufferWriter<byte>();
 
         // Determine compression strategy
-        // todo, this should be an escape hatch for when the RLE delta is too large, if we bail out before we really know
-        // then that's a good thing, because we can't use RLE.
         bool useRLE = ShouldUseRLE(oldData, newData, options);
         var patternCounts = default(PatternCounts);
 
@@ -491,9 +439,6 @@ public static class DeltaZor
         return true;
     }
 
-    /// <summary>
-    /// Applies a delta using spans for zero allocations.
-    /// </summary>
     public static DeltaResult<bool> ApplyDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> delta, Span<byte> output, out DeltaStats stats)
     {
         stats = default;
@@ -563,9 +508,6 @@ public static class DeltaZor
         return success ? DeltaResult<bool>.Ok(true) : DeltaResult<bool>.Fail("Delta application failed");
     }
 
-    /// <summary>
-    /// Analyzes compression characteristics using spans.
-    /// </summary>
     public static DeltaStats AnalyzeDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData)
     {
         int changes = 0;
@@ -661,79 +603,113 @@ public static class DeltaZor
     {
         var patternCounts = new PatternCounts();
         int minLength = Math.Min(oldData.Length, newData.Length);
-        int i = 0;
+        int pos = 0;
 
-        // Lists to track recent operations for motif detection
-        var recentOperations = new List<(byte opcode, int count, byte[] xorData)>();
-        var activeMotifs = new List<ActiveMotif>();
+        MotifAccumulator acc = MotifAccumulator.Init();
 
-        // Process overlapping region with RLE
-        while (i < minLength)
+        Span<byte> provisional = stackalloc byte[options.MaxStackBufferSize];
+        int provisionalWritten = 0;
+        Span<byte> oneByteSpan = stackalloc byte[1];
+        while (pos < minLength)
         {
-            int runStart = i;
-            byte xor = (byte)(oldData[i] ^ newData[i]);
+            int runStart = pos;
+            byte xor = (byte)(oldData[pos] ^ newData[pos]);
 
-            if (xor == 0)
-            {
-                // Count zero run
-                while (i < minLength && (oldData[i] ^ newData[i]) == 0) i++;
-                int runLength = i - runStart;
-                WriteRLEOpcode(writer, RLE_ZeroRun, runLength);
-                patternCounts = patternCounts with { ZeroRunCount = patternCounts.ZeroRunCount + 1 };
-                recentOperations.Add((RLE_ZeroRun, runLength, Array.Empty<byte>()));
-            }
-            else
-            {
-                // Count non-zero run
-                while (i < minLength && (oldData[i] ^ newData[i]) != 0) i++;
-                int runLength = i - runStart;
-                WriteRLEOpcode(writer, RLE_NonZeroRun, runLength);
-                patternCounts = patternCounts with { NonZeroRunCount = patternCounts.NonZeroRunCount + 1 };
+            bool isZeroRun = xor == 0;
 
-                // Allocate temp buffer for XOR computation
-                IMemoryOwner<byte> owner = MemoryPool<byte>.Shared.Rent(runLength);
-                Span<byte> xorBuffer = owner.Memory.Span[..runLength];
+            int runLen = 1;
+            while (pos + runLen < minLength && ((oldData[pos + runLen] ^ newData[pos + runLen]) == 0) == isZeroRun)
+                runLen++;
 
-                try
-                {
-                    // Compute XOR using SIMD
-                    WriteXORDelta(oldData, newData, xorBuffer, runStart, runLength, options);
-                    writer.Write(xorBuffer);
-                    
-                    // Add to recent operations for motif detection
-                    recentOperations.Add((RLE_NonZeroRun, runLength, xorBuffer.ToArray()));
-                }
-                finally
-                {
-                    owner.Dispose();
-                }
-            }
+            byte opcode = isZeroRun ? RLE_ZeroRun : RLE_NonZeroRun;
             
-            // Simple motif detection: Check if we have a repeating pattern
-            // This is a simplified implementation - in a full implementation,
-            // we would use more sophisticated pattern matching
-            if (recentOperations.Count >= 4)
+            // Lazy motif update
+            if (options.EnableMotifDetection)
             {
-                // Check for simple 2-operation repeating pattern
-                var op1 = recentOperations[recentOperations.Count - 4];
-                var op2 = recentOperations[recentOperations.Count - 3];
-                var op3 = recentOperations[recentOperations.Count - 2];
-                var op4 = recentOperations[recentOperations.Count - 1];
-                
-                // Check if op1 matches op3 and op2 matches op4 (simple repeat pattern)
-                if (op1.opcode == op3.opcode && op1.count == op3.count &&
-                    op2.opcode == op4.opcode && op2.count == op4.count)
+                UpdateAccumulator(ref acc, pos, runLen, isZeroRun, options);
+            }
+
+            // Flush provisional if active false now (pruned)
+            if (provisionalWritten > 0 && !acc.IsActive)
+            {
+                writer.Write(provisional.Slice(0, provisionalWritten));
+                provisionalWritten = 0;
+            }
+
+            // Check for motif emission
+            bool emittedMotif = false;
+            if (options.EnableMotifDetection && acc.IsActive && acc.BestProbeIdx != 255)
+            {
+                int probeIdx = acc.BestProbeIdx;
+                uint mask = acc.GetMask(probeIdx);
+                int unitSize = MotifUnitSizes[probeIdx];
+                int covered = pos + runLen - acc.StartPos;
+
+                if (covered % unitSize == 0)
                 {
-                    // Found a potential motif - for now, just note it
-                    // In a full implementation, we would replace the operations with a motif opcode
-                }
-                
-                // Keep only the last 8 operations
-                if (recentOperations.Count > 8)
-                {
-                    recentOperations.RemoveAt(0);
+                    int repeatLength = covered / unitSize;
+                    float density = BitOperations.PopCount(mask) / (float)unitSize;
+
+                    if (repeatLength >= MotifMinStreak && density < MotifDensityThreshold && repeatLength <= MaxMotifStreak && EstimateMotifSavings(mask, repeatLength, unitSize, covered) > MotifSavingsThreshold)
+                    {
+                        WriteMotifOpcode(writer, acc, probeIdx, oldData.Slice(acc.StartPos, covered), newData.Slice(acc.StartPos, covered), options, ref patternCounts);
+                        emittedMotif = true;
+                        provisionalWritten = 0;
+                        pos = acc.StartPos + covered;
+                        acc = MotifAccumulator.Init(); // Reset
+                        continue; // Skip fallback
+                    }
                 }
             }
+
+            if (!emittedMotif)
+            {
+                int opcodeSize = 1 + Get7BitEncodedSize(runLen);
+                int dataSize = isZeroRun ? 0 : runLen;
+                int totalNeeded = opcodeSize + dataSize;
+
+                if (acc.IsActive)
+                {
+                    if (provisionalWritten + totalNeeded > options.MaxStackBufferSize)
+                    {
+                        writer.Write(provisional.Slice(0, provisionalWritten));
+                        provisionalWritten = 0;
+                        acc = MotifAccumulator.Init(); // Flush and reset if full
+                    }
+
+                    provisional[provisionalWritten] = opcode;
+                    provisionalWritten++;
+                    provisionalWritten += Write7BitEncodedInt(provisional.Slice(provisionalWritten), runLen);
+                    if (!isZeroRun)
+                    {
+                        WriteXORDelta(oldData, newData, provisional.Slice(provisionalWritten), pos, runLen, options);
+                        provisionalWritten += runLen;
+                    }
+                }
+                else
+                {
+                    oneByteSpan[0] = opcode;
+                    writer.Write(oneByteSpan);
+                    Write7BitEncodedInt(writer, runLen);
+                    if (!isZeroRun)
+                    {
+                        Span<byte> xorTemp = stackalloc byte[runLen];
+                        WriteXORDelta(oldData, newData, xorTemp, pos, runLen, options);
+                        writer.Write(xorTemp);
+                    }
+                    if (isZeroRun) patternCounts = patternCounts with { ZeroRunCount = patternCounts.ZeroRunCount + 1 };
+                    else patternCounts = patternCounts with { NonZeroRunCount = patternCounts.NonZeroRunCount + 1 };
+                }
+            }
+
+            pos += runLen;
+        }
+
+        // Flush any remaining provisional
+        if (provisionalWritten > 0)
+        {
+            writer.Write(provisional.Slice(0, provisionalWritten));
+            provisionalWritten = 0;
         }
 
         // Handle length differences
@@ -741,18 +717,213 @@ public static class DeltaZor
         {
             // Extension: append remaining bytes
             ReadOnlySpan<byte> extension = newData[oldData.Length..];
-            WriteRLEOpcode(writer, RLE_Extension, extension.Length);
+            oneByteSpan[0] = RLE_Extension;
+            writer.Write(oneByteSpan);
+            Write7BitEncodedInt(writer, extension.Length);
             writer.Write(extension);
             patternCounts = patternCounts with { ExtensionCount = patternCounts.ExtensionCount + 1 };
         }
         else if (newData.Length < oldData.Length)
         {
             // Truncation: set new length
-            WriteRLEOpcode(writer, RLE_Truncation, newData.Length);
+            oneByteSpan[0] = RLE_Truncation;
+            writer.Write(oneByteSpan);
+            Write7BitEncodedInt(writer, newData.Length);
             patternCounts = patternCounts with { TruncationCount = patternCounts.TruncationCount + 1 };
         }
 
         return patternCounts;
+    }
+
+    private static uint ComputeBitRun(int start, int len, int unitSize)
+    {
+        if (len == 0) return 0;
+        if (len >= unitSize) return (1u << unitSize) - 1u;
+
+        int pos = start % unitSize;
+        if (pos + len <= unitSize)
+        {
+            return ((1u << len) - 1u) << pos;
+        }
+        else
+        {
+            int highLen = unitSize - pos;
+            uint high = ((1u << highLen) - 1u) << pos;
+            int lowLen = len - highLen;
+            uint low = (1u << lowLen) - 1u;
+            return high | low;
+        }
+    }
+
+    private static void UpdateAccumulator(ref MotifAccumulator acc, int globalPos, int runLen, bool isZeroRun, DeltaOptions options)
+    {
+        if (!acc.IsActive)
+        {
+            acc.StartPos = globalPos;
+            acc.IsActive = true;
+        }
+
+        if (runLen > options.MaxStackBufferSize)
+        {
+            acc = MotifAccumulator.Init(); // Reset for very large runs
+            return;
+        }
+
+        Span<uint> oldMasks = stackalloc uint[MotifProbeCount];
+        Span<float> densities = stackalloc float[MotifProbeCount];
+
+        unsafe
+        {
+            for (int i = 0; i < MotifProbeCount; i++)
+            {
+                oldMasks[i] = acc.RollingMasks[i];
+            }
+        }
+
+        for (int i = 0; i < MotifProbeCount; i++)
+        {
+            int unitSize = MotifUnitSizes[i];
+            uint bitrun = ComputeBitRun(globalPos, runLen, unitSize);
+
+            if (isZeroRun)
+            {
+                if ((oldMasks[i] & bitrun) != 0)
+                {
+                    // Expected change but zero run -> reset
+                    unsafe { acc.Streaks[i] = 0; }
+                }
+                else
+                {
+                    // Consistent no change -> increment
+                    unsafe { acc.Streaks[i]++; }
+                }
+            }
+            else
+            {
+                uint newMask = oldMasks[i] | bitrun;
+                if (newMask != oldMasks[i])
+                {
+                    unsafe { acc.Streaks[i] = 1; } // New bits introduced
+                }
+                else
+                {
+                    unsafe { acc.Streaks[i]++; }
+                }
+                unsafe { acc.RollingMasks[i] = newMask; }
+            }
+
+            uint currentMask = oldMasks[i]; // Use updated for density
+            if (!isZeroRun) currentMask |= bitrun;
+            densities[i] = BitOperations.PopCount(currentMask) / (float)unitSize;
+            if (densities[i] >= MotifDensityThreshold)
+            {
+                unsafe { acc.Streaks[i] = 0; } // Prune
+            }
+        }
+
+        // Update best probe
+        byte best = 255;
+        float bestScore = 0;
+        unsafe
+        {
+            for (int i = 0; i < MotifProbeCount; i++)
+            {
+                if (acc.Streaks[i] >= MotifMinStreak)
+                {
+                    float score = acc.Streaks[i] / (densities[i] + 0.01f);
+                    if (score > bestScore)
+                    {
+                        bestScore = score;
+                        best = (byte)i;
+                    }
+                }
+            }
+        }
+        acc.BestProbeIdx = best;
+
+        if (best == 255)
+        {
+            acc.IsActive = false;
+        }
+    }
+
+    private static float EstimateMotifSavings(uint mask, int repeatLength, int unitSize, int covered)
+    {
+        int pop = BitOperations.PopCount(mask);
+        // Assume varying for conservative estimate
+        int motifSize = 1 + 1 + Get7BitEncodedSize(repeatLength) + Get7BitEncodedSize(unitSize) + Get7BitEncodedSize((int)mask) + (pop * repeatLength);
+        int rleSizeApprox = (covered / 10) * (1 + Get7BitEncodedSize(10) + 5); // Rough estimate for RLE ops + data
+        return (rleSizeApprox - motifSize) / (float)rleSizeApprox;
+    }
+
+    private static void WriteMotifOpcode(IBufferWriter<byte> writer, MotifAccumulator acc, int probeIdx, ReadOnlySpan<byte> oldSlice, ReadOnlySpan<byte> newSlice, DeltaOptions options, ref PatternCounts counts)
+    {
+        uint mask = acc.GetMask(probeIdx);
+        int unitSize = MotifUnitSizes[probeIdx];
+        int repeatLength = acc.GetStreak(probeIdx);
+        int changedCount = BitOperations.PopCount(mask);
+
+        Span<int> posList = stackalloc int[unitSize];
+        int p = 0;
+        for (int i = 0; i < unitSize; i++)
+        {
+            if ((mask & (1u << i)) != 0)
+            {
+                posList[p++] = i;
+            }
+        }
+
+        Span<byte> packed = stackalloc byte[changedCount * repeatLength];
+        int dataCursor = 0;
+        for (int r = 0; r < repeatLength; r++)
+        {
+            for (int c = 0; c < changedCount; c++)
+            {
+                int localPos = posList[c];
+                packed[dataCursor + c] = (byte)(oldSlice[r * unitSize + localPos] ^ newSlice[r * unitSize + localPos]);
+            }
+            dataCursor += changedCount;
+        }
+
+        bool isUniform = true;
+        if (repeatLength > 1)
+        {
+            Span<byte> first = packed.Slice(0, changedCount);
+            for (int r = 1; r < repeatLength; r++)
+            {
+                if (!packed.Slice(r * changedCount, changedCount).SequenceEqual(first))
+                {
+                    isUniform = false;
+                    break;
+                }
+            }
+        }
+
+        byte opcode = isUniform ? RLE_UniformMotifRepeat : RLE_VaryingMotifRepeat;
+        Span<byte> oneByteSpan = stackalloc byte[1];
+        oneByteSpan[0] = opcode;
+        writer.Write(oneByteSpan);
+        oneByteSpan[0] = 0x80; // Flags: masked
+        writer.Write(oneByteSpan);
+        Write7BitEncodedInt(writer, repeatLength);
+        Write7BitEncodedInt(writer, unitSize);
+        Write7BitEncodedInt(writer, (int)mask);
+
+        int dataSize = isUniform ? changedCount : changedCount * repeatLength;
+        writer.Write(packed.Slice(0, dataSize));
+
+        float density = changedCount / (float)unitSize;
+        int totalMotifs = counts.UniformMotifCount + counts.VaryingMotifCount + 1;
+        float newAvg = (counts.AverageMaskDensity * (totalMotifs - 1) + density) / totalMotifs;
+
+        if (isUniform)
+        {
+            counts = counts with { UniformMotifCount = counts.UniformMotifCount + 1, AverageMaskDensity = newAvg };
+        }
+        else
+        {
+            counts = counts with { VaryingMotifCount = counts.VaryingMotifCount + 1, AverageMaskDensity = newAvg };
+        }
     }
 
     private static bool ApplyRLEDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> delta, Span<byte> output, DeltaOptions options)
@@ -817,7 +988,7 @@ public static class DeltaZor
                             return false;
                         if (!reader.TryRead7BitEncodedInt(out int unitSize))
                             return false;
-                        
+
                         bool isMasked = (flags & 0x80) != 0;
                         uint mask = 0;
                         int changedCount;
@@ -832,26 +1003,28 @@ public static class DeltaZor
                         {
                             changedCount = unitSize;
                         }
-                        
+
                         // Read XOR data for uniform motif
-                        byte[] uniformXorData = reader.Read(changedCount).ToArray();
-                        
+                        ReadOnlySpan<byte> uniformXorData = reader.Read(changedCount);
+
+                        if (pos + unitSize * repeatLength > output.Length) return false;
+
                         // Get positions from mask
-                        List<int> posList = new List<int>(changedCount);
+                        Span<int> posList = stackalloc int[unitSize];
+                        int c = 0;
                         for (int i = 0; i < unitSize; i++)
                         {
                             if ((mask & (1u << i)) != 0)
-                                posList.Add(i);
+                                posList[c++] = i;
                         }
-                        
+
                         // Apply uniform motif
                         for (int r = 0; r < repeatLength; r++)
                         {
-                            if (pos + unitSize > output.Length) return false;
-                            for (int c = 0; c < changedCount; c++)
+                            for (int j = 0; j < changedCount; j++)
                             {
-                                int localPos = posList[c];
-                                output[pos + localPos] ^= uniformXorData[c];
+                                int localPos = posList[j];
+                                output[pos + localPos] ^= uniformXorData[j];
                             }
                             pos += unitSize;
                         }
@@ -866,7 +1039,7 @@ public static class DeltaZor
                             return false;
                         if (!reader.TryRead7BitEncodedInt(out int unitSize))
                             return false;
-                        
+
                         bool isMasked = (flags & 0x80) != 0;
                         uint mask = 0;
                         int changedCount;
@@ -881,28 +1054,30 @@ public static class DeltaZor
                         {
                             changedCount = unitSize;
                         }
-                        
+
                         // Read all XOR data for varying motif
                         int totalXorDataSize = changedCount * repeatLength;
-                        byte[] allXorData = reader.Read(totalXorDataSize).ToArray();
-                        
+                        ReadOnlySpan<byte> allXorData = reader.Read(totalXorDataSize);
+
+                        if (pos + unitSize * repeatLength > output.Length) return false;
+
                         // Get positions from mask
-                        List<int> posList = new List<int>(changedCount);
+                        Span<int> posList = stackalloc int[unitSize];
+                        int c = 0;
                         for (int i = 0; i < unitSize; i++)
                         {
                             if ((mask & (1u << i)) != 0)
-                                posList.Add(i);
+                                posList[c++] = i;
                         }
-                        
+
                         // Apply varying motif
                         int dataCursor = 0;
                         for (int r = 0; r < repeatLength; r++)
                         {
-                            if (pos + unitSize > output.Length) return false;
-                            for (int c = 0; c < changedCount; c++)
+                            for (int j = 0; j < changedCount; j++)
                             {
-                                int localPos = posList[c];
-                                output[pos + localPos] ^= allXorData[dataCursor + c];
+                                int localPos = posList[j];
+                                output[pos + localPos] ^= allXorData[dataCursor + j];
                             }
                             pos += unitSize;
                             dataCursor += changedCount;
@@ -918,25 +1093,34 @@ public static class DeltaZor
         return pos == output.Length;
     }
 
-    // Removed unused WriteHeader - now inline in CreateDelta
-
-    private static void WriteRLEOpcode(IBufferWriter<byte> writer, byte opcode, int count)
-    {
-        writer.Write(new byte[] { opcode });
-        Write7BitEncodedInt(writer, count);
-    }
-
     private static void Write7BitEncodedInt(IBufferWriter<byte> writer, int value)
     {
+        Span<byte> oneByteSpan = stackalloc byte[1];
         uint v = (uint)value;
         while (v >= 0x80)
         {
-            writer.Write(new byte[] { (byte)(v | 0x80) });
+            oneByteSpan[0] = (byte)(v | 0x80);
+            writer.Write(oneByteSpan);
             v >>= 7;
         }
-        writer.Write(new byte[] { (byte)v });
+
+        oneByteSpan[0] = (byte)v;
+        writer.Write(oneByteSpan);
     }
 
+    private static int Write7BitEncodedInt(Span<byte> span, int value)
+    {
+        int pos = 0;
+        uint v = (uint)value;
+        while (v >= 0x80)
+        {
+            span[pos++] = (byte)(v | 0x80);
+            v >>= 7;
+        }
+        span[pos++] = (byte)v;
+        return pos;
+    }
+    
     private static void Write7BitEncodedInt(BinaryWriter writer, int value)
     {
         uint v = (uint)value;

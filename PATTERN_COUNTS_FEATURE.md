@@ -73,7 +73,7 @@ public readonly struct PatternCounts
     public int TruncationCount { get; init; }     // 0x03 (Trim)
     public int UniformMotifCount { get; init; }   // 0x04 (chunk-less masked)
     public int VaryingMotifCount { get; init; }   // 0x05 (chunk-less masked)
-    public int ChannelRunCount { get; init; }     // TBD
+    public int ChannelRunCount { get; init; }     // 0x08
     public float AverageMaskDensity { get; init; } // Avg popcount(mask)/unitSize for motif sparsity
     public int TotalPatternCount => ... (update sum);
 
@@ -82,6 +82,8 @@ public readonly struct PatternCounts
     public int HalfPatternCount { get; init; }    // TBD
 }
 ```
+
+Enhancements: With the lazy single-accumulator motif detection (supporting variable UnitSizes 2-8 via bit-packed constants), AverageMaskDensity now aggregates per-motif sparsity across detected probes for deeper diagnostics. If the detection exposes granular details (e.g., average UnitSize or probe hit rates), extend this struct allocation-free (e.g., via fixed-stack fields) to track them without heap overhead.
 
 ### 2. New CreateDelta Overload
 A new overload of the `CreateDelta` method has been added that returns pattern counts:
@@ -111,9 +113,9 @@ private static PatternCounts CreateRLEDeltaWithCounts(ReadOnlySpan<byte> oldData
 2. **NonZeroRunCount** - Number of RLE_NonZeroRun (0x01) opcodes emitted
 3. **ExtensionCount** - Number of RLE_Extension (0x02) opcodes emitted
 4. **TruncationCount** - Number of RLE_Truncation (0x03) opcodes emitted
-5. **UniformMotifCount** - Number of chunk-less Uniform Motif (0x04) opcodes
-6. **VaryingMotifCount** - Number of chunk-less Varying Motif (0x05) opcodes
-7. **AverageMaskDensity** - Average sparsity (popcount(mask)/unitSize) across motifs
+5. **UniformMotifCount** - Number of chunk-less Uniform Motif (0x04) opcodes, tracked via lazy accumulator updates at opcode boundaries for zero-allocation efficiency.
+6. **VaryingMotifCount** - Number of chunk-less Varying Motif (0x05) opcodes, similarly integrated with the single MotifAccumulator for SIMD-batch counting.
+7. **AverageMaskDensity** - Average sparsity (popcount(mask)/unitSize) across motifs, now computed from bit-packed rolling masks in the lazy detection pipeline for precise, cache-coherent diagnostics.
 
 ## Code Changes
 1. **DeltaZor.cs** - Added `PatternCounts` struct and new overloads

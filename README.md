@@ -6,7 +6,7 @@ High-performance, zero-allocation, SIMD-accelerated adaptive binary deltas with 
 - Opcodes 0x00-0x03: ZeroRun (COPY), NonZeroRun (XOR), Extension (Extend), Truncation (Trim).
 
 ## High-Priority (Partial)
-- MOTIF Repeats (0x04 Uniform, 0x05 Varying): Chunk-less mask-based with contiguous packing for repeating patterns. Prioritize completion.
+- MOTIF Repeats (0x04 Uniform, 0x05 Varying): Implemented with chunk-less mask-based contiguous packing for repeating patterns, featuring lazy, single-accumulator detection for variable UnitSizes 2-8 in a single-pass, allocation-free manner.
 
 ## Pending Features
 - ChannelRun (TBD) for structured data (integratable with MOTIF).
