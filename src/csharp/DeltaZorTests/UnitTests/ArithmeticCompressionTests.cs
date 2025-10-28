@@ -122,6 +122,7 @@ namespace DZ.Tests.UnitTests
             // but we can verify that our enhanced ShouldUseRLE method still works
             var oldData = new byte[1024];
             var newData = new byte[1024];
+            Array.Copy(floatData, oldData, 1024);
             Array.Copy(floatData, newData, 1024);
             
             // This should not throw an exception
