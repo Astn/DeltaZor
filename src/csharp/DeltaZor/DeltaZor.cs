@@ -697,10 +697,11 @@ public static class DeltaZor
                         WriteXORDelta(oldData, newData, xorTemp, pos, runLen, options);
                         writer.Write(xorTemp);
                     }
-                    if (isZeroRun) patternCounts = patternCounts with { ZeroRunCount = patternCounts.ZeroRunCount + 1 };
-                    else patternCounts = patternCounts with { NonZeroRunCount = patternCounts.NonZeroRunCount + 1 };
                 }
             }
+
+            if (isZeroRun) patternCounts = patternCounts with { ZeroRunCount = patternCounts.ZeroRunCount + 1 };
+            else patternCounts = patternCounts with { NonZeroRunCount = patternCounts.NonZeroRunCount + 1 };
 
             pos += runLen;
         }
