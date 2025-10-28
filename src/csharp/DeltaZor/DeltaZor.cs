@@ -58,8 +58,8 @@ public static class DeltaZor
     private const byte RLE_NonZeroRun = 0x01;       // Implemented: [opcode:1][count:7bit][xor_data:count] - XOR run.
     private const byte RLE_Extension = 0x02;        // Implemented: [opcode:1][count:7bit][extension_data:count] - Append new bytes.
     private const byte RLE_Truncation = 0x03;       // Implemented: [opcode:1][new_length:4] - Trim to length.
-    private const byte RLE_UniformMotifRepeat = 0x04; // Partial: Uniform repeating patterns; high priority for full impl.
-    private const byte RLE_VaryingMotifRepeat = 0x05; // Partial: Varying repeating patterns; high priority for full impl.
+    private const byte RLE_UniformMotifRepeat = 0x04; // Partial: Chunk-less mask-based uniform repeats; high priority for full impl.
+    private const byte RLE_VaryingMotifRepeat = 0x05; // Partial: Chunk-less mask-based varying repeats; high priority for full impl.
     private const byte RLE_FloatRun = 0x06;         // Pending: Specialized for float32 runs; [opcode:1][count:7bit][float_xor_data:count*4].
     private const byte RLE_HalfRun = 0x07;          // Pending: Specialized for half-float (16-bit) runs; [opcode:1][count:7bit][half_xor_data:count*2].
     private const byte RLE_ChannelRun = 0x08;       // Pending: Channel-optimized runs; [opcode:1][count:7bit][channels:1][mask:1][changed_data:variable].
@@ -139,50 +139,33 @@ public static class DeltaZor
     }
 
     /// <summary>
-    /// Represents a chunk in a motif pattern.
-    /// </summary>
-    internal readonly struct MotifChunk
-    {
-        public byte Type { get; init; }  // 0 = Copy (ZeroRun), 1 = XOR (NonZeroRun)
-        public int Size { get; init; }   // Number of bytes for this chunk
-
-        public bool Equals(MotifChunk other) => Type == other.Type && Size == other.Size;
-        public override int GetHashCode() => HashCode.Combine(Type, Size);
-    }
-
-    /// <summary>
     /// Represents an active motif being detected during RLE creation.
     /// </summary>
     internal class ActiveMotif
     {
-        public List<MotifChunk> UnitLayout { get; } = new(8);  // Chunks (e.g., 4 for your example)
-        public byte[] FirstUnitXorData { get; set; } = Array.Empty<byte>();  // For uniform (e.g., 5 bytes)
-        public List<byte[]> AllUnitXorData { get; } = new(32);  // For varying (per-unit XOR bytes; cap at 32 repeats)
+        public uint Mask { get; set; } = 0;
+        public byte[] FirstUnitXorData { get; set; } = Array.Empty<byte>();  // Packed for masked positions
+        public List<byte[]> AllUnitXorData { get; } = new(32);  // Packed per-unit; cap at 32 repeats
         public int Streak { get; set; } = 1;  // Ongoing
         public int StartOffset { get; set; } = -1;
-        public int BlockByteSize { get; set; } = 0;
+        public int UnitSize { get; set; } = 0;
         public bool IsProvisional { get; set; } = true;
         public bool Confirmed { get; set; } = false;
         public bool CanBeUniform { get; set; } = true;  // Updated during verification
 
         // Append/verify per unit (ongoing)
-        public void AppendOrVerifyUnit(MotifChunk[] newChunks, byte[] newXorData)
+        public void AppendOrVerifyUnit(byte[] newXorData)
         {
-            if (UnitLayout.Count == 0)
+            if (AllUnitXorData.Count == 0)
             {
                 // First unit
-                foreach (var chunk in newChunks) UnitLayout.Add(chunk);
-                FirstUnitXorData = newXorData;  // e.g., 5 bytes
+                FirstUnitXorData = newXorData;  // Packed
                 AllUnitXorData.Add(newXorData);
                 CanBeUniform = true;
             }
             else
             {
-                // Verify layout
-                if (UnitLayout.Count != newChunks.Length || !UnitLayout.SequenceEqual(newChunks))
-                {
-                    throw new InvalidOperationException("Layout mismatch");
-                }
+                // Verify (mask already set by caller)
                 AllUnitXorData.Add(newXorData);  // Always append for varying fallback
 
                 // Check for uniform
@@ -192,7 +175,7 @@ public static class DeltaZor
                 }
             }
             Streak++;
-            // BlockByteSize will be set by caller
+            // UnitSize set by caller
         }
 
         // Compute for chosen opcode (called on confirmation)
@@ -202,28 +185,21 @@ public static class DeltaZor
             var writer = new BinaryWriter(ms);
             byte opcode = useUniform ? RLE_UniformMotifRepeat : RLE_VaryingMotifRepeat;
             writer.Write(opcode);
+            writer.Write((byte)0x80);  // Flags: masked mode
             Write7BitEncodedInt(writer, Streak);  // e.g., 20
-            writer.Write((byte)UnitLayout.Count);  // e.g., 4
-
-            // Shared layout: [Type(1)][Size(7-bit)] per chunk
-            foreach (var chunk in UnitLayout)
-            {
-                writer.Write(chunk.Type);
-                Write7BitEncodedInt(writer, chunk.Size);
-            }
+            Write7BitEncodedInt(writer, UnitSize);  // e.g., 4
+            Write7BitEncodedInt(writer, (int)Mask);  // e.g., 0x02
 
             // Opcode-specific data
             if (useUniform)
             {
-                // 0x05: Just first-unit XOR data
                 writer.Write(FirstUnitXorData);
             }
             else
             {
-                // 0x06: Full sequential XOR data (all units concatenated)
                 foreach (var unitData in AllUnitXorData)
                 {
-                    writer.Write(unitData);  // 5 bytes each x20 = 100
+                    writer.Write(unitData);
                 }
             }
 
@@ -255,6 +231,7 @@ public static class DeltaZor
         public int TruncationCount { get; init; }     // 0x03 (Implemented)
         public int UniformMotifCount { get; init; }   // 0x04 (Partial)
         public int VaryingMotifCount { get; init; }   // 0x05 (Partial)
+        public float AverageMaskDensity { get; init; } // Avg popcount(mask)/unitSize for motif sparsity
         public int TotalPatternCount => ZeroRunCount + NonZeroRunCount + ExtensionCount + TruncationCount + ChannelRunCount + UniformMotifCount + VaryingMotifCount;
         
         // For future specialized pattern detection
@@ -834,127 +811,101 @@ public static class DeltaZor
 
                 case RLE_UniformMotifRepeat:  // UniformMotifRepeat
                     {
+                        if (!reader.TryReadByte(out byte flags))
+                            return false;
                         if (!reader.TryRead7BitEncodedInt(out int repeatLength))
                             return false;
-                        if (!reader.TryReadByte(out byte numChunks))
+                        if (!reader.TryRead7BitEncodedInt(out int unitSize))
                             return false;
                         
-                        // Read layout chunks
-                        var layout = new MotifChunk[numChunks];
-                        int totalXorSize = 0;
-                        for (int c = 0; c < numChunks; c++)
+                        bool isMasked = (flags & 0x80) != 0;
+                        uint mask = 0;
+                        int changedCount;
+                        if (isMasked)
                         {
-                            if (!reader.TryReadByte(out byte chunkType))
+                            if (!reader.TryRead7BitEncodedInt(out int maskInt))
                                 return false;
-                            if (!reader.TryRead7BitEncodedInt(out int chunkSize))
-                                return false;
-                            layout[c] = new MotifChunk { Type = chunkType, Size = chunkSize };
-                            if (chunkType == 0x01) // XOR type
-                                totalXorSize += chunkSize;
+                            mask = (uint)maskInt;
+                            changedCount = BitOperations.PopCount(mask);
+                        }
+                        else
+                        {
+                            changedCount = unitSize;
                         }
                         
                         // Read XOR data for uniform motif
-                        byte[] uniformXorData = reader.Read(totalXorSize).ToArray();
+                        byte[] uniformXorData = reader.Read(changedCount).ToArray();
                         
-                        // Apply uniform motif
-                        int[] xorOffsets = new int[numChunks];
-                        int offset = 0;
-                        for (int c = 0; c < numChunks; c++)
+                        // Get positions from mask
+                        List<int> posList = new List<int>(changedCount);
+                        for (int i = 0; i < unitSize; i++)
                         {
-                            if (layout[c].Type == 0x01) // XOR type
-                            {
-                                xorOffsets[c] = offset;
-                                offset += layout[c].Size;
-                            }
+                            if ((mask & (1u << i)) != 0)
+                                posList.Add(i);
                         }
                         
+                        // Apply uniform motif
                         for (int r = 0; r < repeatLength; r++)
                         {
-                            for (int c = 0; c < numChunks; c++)
+                            if (pos + unitSize > output.Length) return false;
+                            for (int c = 0; c < changedCount; c++)
                             {
-                                var chunk = layout[c];
-                                if (chunk.Type == 0x00) // Copy (ZeroRun)
-                                {
-                                    if (pos + chunk.Size > output.Length) return false;
-                                    oldData.Slice(pos, chunk.Size).CopyTo(output.Slice(pos, chunk.Size));
-                                    pos += chunk.Size;
-                                }
-                                else if (chunk.Type == 0x01) // XOR (NonZeroRun)
-                                {
-                                    if (pos + chunk.Size > output.Length) return false;
-                                    int xorOffset = xorOffsets[c];
-                                    for (int j = 0; j < chunk.Size; j++)
-                                    {
-                                        output[pos + j] ^= uniformXorData[xorOffset + j];
-                                    }
-                                    pos += chunk.Size;
-                                }
+                                int localPos = posList[c];
+                                output[pos + localPos] ^= uniformXorData[c];
                             }
+                            pos += unitSize;
                         }
                     }
                     break;
 
                 case RLE_VaryingMotifRepeat:  // VaryingMotifRepeat
                     {
+                        if (!reader.TryReadByte(out byte flags))
+                            return false;
                         if (!reader.TryRead7BitEncodedInt(out int repeatLength))
                             return false;
-                        if (!reader.TryReadByte(out byte numChunks))
+                        if (!reader.TryRead7BitEncodedInt(out int unitSize))
                             return false;
                         
-                        // Read layout chunks
-                        var layout = new MotifChunk[numChunks];
-                        int totalXorSizePerUnit = 0;
-                        for (int c = 0; c < numChunks; c++)
+                        bool isMasked = (flags & 0x80) != 0;
+                        uint mask = 0;
+                        int changedCount;
+                        if (isMasked)
                         {
-                            if (!reader.TryReadByte(out byte chunkType))
+                            if (!reader.TryRead7BitEncodedInt(out int maskInt))
                                 return false;
-                            if (!reader.TryRead7BitEncodedInt(out int chunkSize))
-                                return false;
-                            layout[c] = new MotifChunk { Type = chunkType, Size = chunkSize };
-                            if (chunkType == 0x01) // XOR type
-                                totalXorSizePerUnit += chunkSize;
+                            mask = (uint)maskInt;
+                            changedCount = BitOperations.PopCount(mask);
+                        }
+                        else
+                        {
+                            changedCount = unitSize;
                         }
                         
                         // Read all XOR data for varying motif
-                        int totalXorDataSize = totalXorSizePerUnit * repeatLength;
+                        int totalXorDataSize = changedCount * repeatLength;
                         byte[] allXorData = reader.Read(totalXorDataSize).ToArray();
                         
-                        // Apply varying motif
-                        int[] xorOffsets = new int[numChunks];
-                        int offset = 0;
-                        for (int c = 0; c < numChunks; c++)
+                        // Get positions from mask
+                        List<int> posList = new List<int>(changedCount);
+                        for (int i = 0; i < unitSize; i++)
                         {
-                            if (layout[c].Type == 0x01) // XOR type
-                            {
-                                xorOffsets[c] = offset;
-                                offset += layout[c].Size;
-                            }
+                            if ((mask & (1u << i)) != 0)
+                                posList.Add(i);
                         }
                         
+                        // Apply varying motif
                         int dataCursor = 0;
                         for (int r = 0; r < repeatLength; r++)
                         {
-                            for (int c = 0; c < numChunks; c++)
+                            if (pos + unitSize > output.Length) return false;
+                            for (int c = 0; c < changedCount; c++)
                             {
-                                var chunk = layout[c];
-                                if (chunk.Type == 0x00) // Copy (ZeroRun)
-                                {
-                                    if (pos + chunk.Size > output.Length) return false;
-                                    oldData.Slice(pos, chunk.Size).CopyTo(output.Slice(pos, chunk.Size));
-                                    pos += chunk.Size;
-                                }
-                                else if (chunk.Type == 0x01) // XOR (NonZeroRun)
-                                {
-                                    if (pos + chunk.Size > output.Length) return false;
-                                    int xorOffset = dataCursor + xorOffsets[c];
-                                    for (int j = 0; j < chunk.Size; j++)
-                                    {
-                                        output[pos + j] ^= allXorData[xorOffset + j];
-                                    }
-                                    pos += chunk.Size;
-                                }
+                                int localPos = posList[c];
+                                output[pos + localPos] ^= allXorData[dataCursor + c];
                             }
-                            dataCursor += totalXorSizePerUnit;
+                            pos += unitSize;
+                            dataCursor += changedCount;
                         }
                     }
                     break;
