@@ -42,7 +42,171 @@ var tests = new ITestCase[]
     new Test026_UDP512_Sparse(),
     new Test027_UDP512_Mixed(),
     new Test028_UDP512_ZeroRun(),
-    new Test029_UDP512_NonZeroRun()
+    new Test029_UDP512_NonZeroRun(),
+    new Test030_512_Vertical_1_by_3(),
+    new Test031_512_Vertical_2_by_2(),
+    new Test032_512_Vertical_2_by_6(),
+    new Test033_512_Vertical_2_by_14(),
+    new GenericVerticalStripeTest(
+        id: 34,
+        namePrefix: "D",
+        size: 512,
+        seed: 0xDE17A20u,
+        changeSize: 2,
+        unchangedSize: 14,
+        extraChangeSize: 0,
+        extraUnchangedSize: 0,
+        offset: 0,
+        intervalMultiplier: 1,
+        modifier: b => (byte)(b ^ 0xFF),
+        expectedDeltaSize: 201, // Placeholder; simulated RLE estimate (actual may be lower with motifs)
+        tags: new[] { "udp", "512b", "mixed", "xor", "vertical" },
+        descriptionTemplate: "{size}B packet: {change}/{total}ths {op}-flipped vertical"
+    ),
+    new GenericVerticalStripeTest(
+        id: 35,
+        namePrefix: "D",
+        size: 4096,
+        seed: 0xDE17A21u,
+        changeSize: 4,
+        unchangedSize: 4,
+        extraChangeSize: 0,
+        extraUnchangedSize: 0,
+        offset: 0,
+        intervalMultiplier: 1,
+        modifier: b => (byte)(b ^ 0xFF),
+        expectedDeltaSize: 2049, // Placeholder; larger buffer for SIMD stress, motif-aligned (unit=8)
+        tags: new[] { "large", "4096b", "mixed", "xor", "motif" },
+        descriptionTemplate: "{size}B buffer: {change}/{total}ths {op}-flipped, motif-aligned"
+    ),
+    new GenericVerticalStripeTest(
+        id: 36,
+        namePrefix: "D",
+        size: 512,
+        seed: 0xDE17A22u,
+        changeSize: 1,
+        unchangedSize: 3,
+        extraChangeSize: 0,
+        extraUnchangedSize: 0,
+        offset: 0,
+        intervalMultiplier: 1,
+        modifier: b => (byte)(b ^ 0xFF),
+        expectedDeltaSize: 385, // Placeholder; sparse channel-like for uniform motif (unit=4)
+        tags: new[] { "udp", "512b", "sparse", "xor", "motif" },
+        descriptionTemplate: "{size}B packet: {change}/{total}ths {op}-flipped, sparse motif test"
+    ),
+    new GenericVerticalStripeTest(
+        id: 37,
+        namePrefix: "D",
+        size: 512,
+        seed: 0xDE17A23u,
+        changeSize: 2,
+        unchangedSize: 14,
+        extraChangeSize: 2,
+        extraUnchangedSize: 0,
+        offset: 0,
+        intervalMultiplier: 1,
+        modifier: b => (byte)(b ^ 0xFF),
+        expectedDeltaSize: 225, // Placeholder; bursty changes for varying motif detection
+        tags: new[] { "udp", "512b", "bursty", "xor", "vertical" },
+        descriptionTemplate: "{size}B packet: {change}/{total}ths {op}-flipped with bursts"
+    ),
+    new GenericVerticalStripeTest(
+        id: 38,
+        namePrefix: "D",
+        size: 512,
+        seed: 0xDE17A24u,
+        changeSize: 2,
+        unchangedSize: 14,
+        extraChangeSize: 0,
+        extraUnchangedSize: 4,
+        offset: 0,
+        intervalMultiplier: 1,
+        modifier: b => (byte)(b ^ 0xFF),
+        expectedDeltaSize: 169, // Placeholder; extra gaps for longer zero runs, RLE efficiency
+        tags: new[] { "udp", "512b", "gappy", "xor", "vertical" },
+        descriptionTemplate: "{size}B packet: {change}/{total}ths {op}-flipped with extra gaps"
+    ),
+    new GenericVerticalStripeTest(
+        id: 39,
+        namePrefix: "D",
+        size: 512,
+        seed: 0xDE17A25u,
+        changeSize: 2,
+        unchangedSize: 14,
+        extraChangeSize: 0,
+        extraUnchangedSize: 0,
+        offset: 8,
+        intervalMultiplier: 1,
+        modifier: b => (byte)(b ^ 0xFF),
+        expectedDeltaSize: 201, // Placeholder; phase shift for boundary/misalignment testing
+        tags: new[] { "udp", "512b", "offset", "xor", "vertical" },
+        descriptionTemplate: "{size}B packet: {change}/{total}ths {op}-flipped with phase shift"
+    ),
+    new GenericVerticalStripeTest(
+        id: 40,
+        namePrefix: "D",
+        size: 1024,
+        seed: 0xDE17A26u,
+        changeSize: 3,
+        unchangedSize: 13,
+        extraChangeSize: 0,
+        extraUnchangedSize: 0,
+        offset: 0,
+        intervalMultiplier: 2,
+        modifier: b => (byte)(b ^ 0xFF),
+        expectedDeltaSize: 297, // Placeholder; scaled intervals for higher-level pattern nesting
+        tags: new[] { "udp", "1024b", "scaled", "xor", "motif" },
+        descriptionTemplate: "{size}B packet: {change}/{total}ths {op}-flipped with scaled intervals"
+    ),
+    new GenericVerticalStripeTest(
+        id: 41,
+        namePrefix: "D",
+        size: 512,
+        seed: 0xDE17A27u,
+        changeSize: 2,
+        unchangedSize: 14,
+        extraChangeSize: 0,
+        extraUnchangedSize: 0,
+        offset: 0,
+        intervalMultiplier: 1,
+        modifier: b => (byte)Math.Clamp(b + 10, 0, 255),
+        expectedDeltaSize: 201, // Placeholder; clamped addition for pending arithmetic/planar testing
+        tags: new[] { "udp", "512b", "add", "vertical" },
+        descriptionTemplate: "{size}B packet: {change}/{total}ths clamped-add modified vertical"
+    ),
+    new GenericVerticalStripeTest(
+        id: 42,
+        namePrefix: "D",
+        size: 512,
+        seed: 0xDE17A28u,
+        changeSize: 2,
+        unchangedSize: 14,
+        extraChangeSize: 0,
+        extraUnchangedSize: 0,
+        offset: 0,
+        intervalMultiplier: 1,
+        modifier: b => (byte)(b << 1),
+        expectedDeltaSize: 201, // Placeholder; bit-shift for pattern diversity in motif hashing
+        tags: new[] { "udp", "512b", "shift", "vertical" },
+        descriptionTemplate: "{size}B packet: {change}/{total}ths left-shifted vertical"
+    ),
+    new GenericVerticalStripeTest(
+        id: 43,
+        namePrefix: "D",
+        size: 512,
+        seed: 0xDE17A29u,
+        changeSize: 8,
+        unchangedSize: 8,
+        extraChangeSize: 0,
+        extraUnchangedSize: 0,
+        offset: 0,
+        intervalMultiplier: 1,
+        modifier: b => (byte)(b ^ 0xFF),
+        expectedDeltaSize: 329, // Placeholder; denser pattern to test compression threshold/fallback
+        tags: new[] { "udp", "512b", "dense", "xor", "vertical" },
+        descriptionTemplate: "{size}B packet: {change}/{total}ths {op}-flipped dense vertical"
+    ),
 };
 
 var manifest = new List<ManifestEntry>();
@@ -102,6 +266,7 @@ foreach (var t in tests)
     md.AppendLine("<table><tr>");
     md.AppendLine("<td><strong>Before</strong></td>");
     md.AppendLine("<td><strong>After</strong></td>");
+    md.AppendLine("<td><strong>DeltaZor Patch</strong></td>");
     md.AppendLine("</tr><tr>");
 
     if (initial.Length < 1024)
@@ -113,7 +278,7 @@ foreach (var t in tests)
         md.AppendLine(HexDumpDiff(next.Span, initial.Span));
         md.AppendLine("</code></pre></td>");
         md.AppendLine("<td><pre><code class=\"language-hex\">");
-        md.AppendLine(HexDump(delta.AsSpan()));
+        md.AppendLine(DeltaDump.ColoredDeltaDump(delta.AsSpan()));
         md.AppendLine("</code></pre></td>");
     }
     else
@@ -123,6 +288,12 @@ foreach (var t in tests)
 
         md.AppendLine($"<td><img src=\"{Path.GetFileName(prevImgPath)}\" width=\"400\"></td>");
         md.AppendLine($"<td><img src=\"{Path.GetFileName(nextImgPath)}\" width=\"400\"></td>");
+        if (delta.Length < 1024)
+        {
+            md.AppendLine("<td><pre><code class=\"language-hex\">");
+            md.AppendLine(DeltaDump.ColoredDeltaDump(delta.AsSpan()));
+            md.AppendLine("</code></pre></td>");
+        }
     }
 
     md.AppendLine("</tr></table>");
