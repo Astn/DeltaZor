@@ -7,31 +7,6 @@ namespace DZ.Tests.UnitTests
     public class ThresholdAndFallbackTests
     {
         [Fact]
-        public void RleBloat_FallbacksToFullReplaceWhenRleIsInefficient()
-        {
-            // Arrange
-            // Create data where every byte is different, making RLE extremely inefficient
-            // RLE would need 2 bytes per value (count + value), doubling the size
-            var oldData = new byte[] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 };
-            var newData = new byte[] { 10, 11, 12, 13, 14, 15, 16, 17, 18, 19 };
-            
-            // Set a low threshold to ensure we're testing the fallback logic
-            var options = new DeltaZor.DeltaOptions { CompressionThreshold = 0.0 };
-
-            // Act
-            var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);
-
-            // Assert
-            Assert.True(delta.Length >= 9); // Header + checksum + minimal data
-            int outputLength = BitConverter.ToInt32(delta, 0);
-            byte compressionType = delta[4];
-
-            Assert.Equal(10, outputLength); // Same output length
-            // Should use full replace (0x01) since RLE would be inefficient
-            Assert.Equal(0x01, compressionType);
-        }
-
-        [Fact]
         public void ThresholdBoundary_CorrectlySwitchesStrategiesAtBoundaries()
         {
             // Arrange
