@@ -6,6 +6,9 @@ using System.IO;
 using System.Numerics;
 using System.Runtime.Intrinsics;
 using System;
+using static DeltaUtils;
+using static DeltaEncoder;
+using static DeltaDecoder;
 
 /// <summary>
 /// High-performance delta compression using RLE-encoded XOR operations.
@@ -412,7 +415,7 @@ public static class DeltaZor
         if (useRLE)
         {
             // Attempt RLE (includes motifs if enabled/small)
-            patternCounts = CreateRLEDelta(oldData, newData, writer, options);
+            patternCounts = DeltaEncoder.CreateRLEDelta(oldData, newData, writer, options);
             usedRLE = true;
         }
         else
@@ -508,7 +511,7 @@ public static class DeltaZor
         switch (compressionType)
         {
             case CompressionType_RLE:
-                success = ApplyRLEDelta(oldData, dataSpan, output[..outputLength], DefaultOptions);
+                success = DeltaDecoder.ApplyRLEDelta(oldData, dataSpan, output[..outputLength], DefaultOptions);
                 stats = new DeltaStats
                 {
                     OldSize = oldData.Length,
@@ -577,68 +580,7 @@ public static class DeltaZor
     }
 
 
-    private static OpCodeCounts CreateRLEDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData,
-        IBufferWriter<byte> writer, DeltaOptions options)
-    {
-        var patternCounts = new OpCodeCounts();
-        int minLength = Math.Min(oldData.Length, newData.Length);
-        Span<byte> oneByteSpan = stackalloc byte[1];
-        Span<byte> tempBuffer = stackalloc byte[options.MaxStackBufferSize];
 
-        bool useFullXor = minLength <= options.MaxStackBufferSize && options.EnableMotifDetection;
-        if (useFullXor)
-        {
-            Span<byte> xorBuffer = stackalloc byte[minLength];
-            WriteXORDelta(oldData, newData, xorBuffer, 0, minLength, options);
-            patternCounts = EncodeXorWithMotifs(xorBuffer, writer, options, patternCounts);
-        }
-        else
-        {
-            // Streaming RLE without motifs for large data
-            int pos = 0;
-            while (pos < minLength)
-            {
-                int runStart = pos;
-                bool isZeroRun = oldData[pos] == newData[pos];
-                while (pos < minLength && (oldData[pos] == newData[pos]) == isZeroRun)
-                    pos++;
-                int runLen = pos - runStart;
-                byte opcode = isZeroRun ? RLE_ZeroRun : RLE_NonZeroRun;
-                oneByteSpan[0] = opcode;
-                writer.Write(oneByteSpan);
-                Write7BitEncodedInt(writer, runLen);
-                if (!isZeroRun)
-                {
-                    Span<byte> xorTemp = tempBuffer[..runLen];
-                    WriteXORDelta(oldData, newData, xorTemp, runStart, runLen, options);
-                    writer.Write(xorTemp);
-                }
-
-                if (isZeroRun) patternCounts.ZeroRunCount++;
-                else patternCounts.NonZeroRunCount++;
-            }
-        }
-
-        // Handle length differences
-        if (newData.Length > oldData.Length)
-        {
-            ReadOnlySpan<byte> extension = newData[oldData.Length..];
-            oneByteSpan[0] = RLE_Extension;
-            writer.Write(oneByteSpan);
-            Write7BitEncodedInt(writer, extension.Length);
-            writer.Write(extension);
-            patternCounts = patternCounts with { ExtensionCount = patternCounts.ExtensionCount + 1 };
-        }
-        else if (newData.Length < oldData.Length)
-        {
-            oneByteSpan[0] = RLE_Truncation;
-            writer.Write(oneByteSpan);
-            Write7BitEncodedInt(writer, newData.Length);
-            patternCounts = patternCounts with { TruncationCount = patternCounts.TruncationCount + 1 };
-        }
-
-        return patternCounts;
-    }
 
     private static int EstimateRLESizeForSpan(ReadOnlySpan<byte> span)
     {
@@ -658,380 +600,13 @@ public static class DeltaZor
         return size;
     }
 
-    private static bool CheckUniform(ReadOnlySpan<byte> xorData, int start, int unit, uint msk, int reps)
-    {
-        int popc = BitOperations.PopCount(msk);
-        Span<byte> first = stackalloc byte[popc];
-        int idx = 0;
-        for (int i = 0; i < unit; i++)
-        {
-            if ((msk & (1u << i)) != 0)
-                first[idx++] = xorData[start + i];
-        }
 
-        for (int r = 1; r < reps; r++)
-        {
-            idx = 0;
-            for (int i = 0; i < unit; i++)
-            {
-                if ((msk & (1u << i)) != 0)
-                {
-                    if (xorData[start + r * unit + i] != first[idx])
-                        return false;
-                    idx++;
-                }
-            }
-        }
 
-        return true;
-    }
 
-    private static MotifCandidate? FindMotifCandidate(ReadOnlySpan<byte> xorData, int startPos, DeltaOptions options)
-    {
-        int len = xorData.Length - startPos;
-        Span<byte> firstUnitBuffer = stackalloc byte[8];
-        for (int u = 0; u < MotifProbeCount; u++)
-        {
-            int unitSize = MotifUnitSizes[u];
-            int maxPossibleRepeat = len / unitSize;
-            if (maxPossibleRepeat < MotifMinStreak) continue;
 
-            // Compute mask from first unit
-            uint mask = 0;
-            int pop = 0;
-            for (int i = 0; i < unitSize; i++)
-            {
-                if (xorData[startPos + i] != 0)
-                {
-                    mask |= (1u << i);
-                    pop++;
-                }
-            }
 
-            if (pop == 0) continue;
 
-            bool isFull = (pop == unitSize);
-            float density = pop / (float)unitSize;
-            if (!isFull && density >= MotifDensityThreshold) continue; // Prune high density masked mode only
 
-            int repeatLen;
-            bool isUniform;
-
-            if (isFull)
-            {
-                // Full mode: check for uniform repeats
-
-                xorData.Slice(startPos, unitSize).CopyTo(firstUnitBuffer[..unitSize]);
-                // // if (density >= MotifDensityThreshold) continue; // Allow emission for full mode high density repeats
-                repeatLen = 1;
-                for (int r = 1; r < maxPossibleRepeat; r++)
-                {
-                    if (!xorData.Slice(startPos + r * unitSize, unitSize).SequenceEqual(firstUnitBuffer[..unitSize]))
-                        break;
-                    repeatLen++;
-                }
-
-                repeatLen = Math.Min(repeatLen, MaxMotifStreak);
-                isUniform = true;
-            }
-            else
-            {
-                // Masked mode: check pattern consistency
-                repeatLen = 1;
-                for (int r = 1; r < maxPossibleRepeat; r++)
-                {
-                    bool matches = true;
-                    for (int i = 0; i < unitSize; i++)
-                    {
-                        byte val = xorData[startPos + r * unitSize + i];
-                        if ((mask & (1u << i)) != 0)
-                        {
-                            if (val == 0)
-                            {
-                                matches = false;
-                                break;
-                            }
-                        }
-                        else
-                        {
-                            if (val != 0)
-                            {
-                                matches = false;
-                                break;
-                            }
-                        }
-                    }
-
-                    if (!matches) break;
-                    repeatLen++;
-                }
-
-                repeatLen = Math.Min(repeatLen, MaxMotifStreak);
-                isUniform = CheckUniform(xorData, startPos, unitSize, mask, repeatLen);
-            }
-
-            if (repeatLen > MaxMotifStreak) continue;
-            if (repeatLen < MotifMinStreak) continue;
-
-            int covered = repeatLen * unitSize;
-            int headerSize = 1 + 1 + Get7BitEncodedSize(repeatLen) + Get7BitEncodedSize(unitSize);
-            int changedCount = isFull ? unitSize : pop;
-            int dataSize = changedCount * (isUniform ? 1 : repeatLen);
-            int motifSize = isFull ? headerSize + dataSize : headerSize + Get7BitEncodedSize((int)mask) + dataSize;
-
-            int rleSize = EstimateRLESizeForSpan(xorData.Slice(startPos, covered));
-            float savings = (rleSize - motifSize) / (float)rleSize;
-
-            if (savings > MotifSavingsThreshold)
-            {
-                return new MotifCandidate(unitSize, repeatLen, covered, isFull ? 0u : mask, isUniform, isFull);
-            }
-        }
-
-        return null;
-    }
-
-    private static OpCodeCounts EncodeXorWithMotifs(ReadOnlySpan<byte> xorData, IBufferWriter<byte> writer,
-        DeltaOptions options, OpCodeCounts counts)
-    {
-        int pos = 0;
-        Span<byte> oneByteSpan = stackalloc byte[1];
-        Span<byte> tempBuffer = stackalloc byte[options.MaxStackBufferSize];
-        Span<int> posListBuffer = stackalloc int[32];
-        while (pos < xorData.Length)
-        {
-            var candidate = FindMotifCandidate(xorData, pos, options);
-            if (candidate.HasValue)
-            {
-                var c = candidate.Value;
-                bool isUniform = c.isUniform;
-                bool isFull = c.isFull;
-                uint mask = c.mask;
-                int unitSize = c.unitSize;
-                int repeatLength = c.repeatLength;
-                int changedCount = isFull ? unitSize : BitOperations.PopCount(mask);
-                byte opcode = isUniform ? RLE_UniformMotifRepeat : RLE_VaryingMotifRepeat;
-                oneByteSpan[0] = opcode;
-                writer.Write(oneByteSpan);
-                byte flags = (byte)(isFull ? 0x00 : 0x80);
-                oneByteSpan[0] = flags;
-                writer.Write(oneByteSpan);
-                Write7BitEncodedInt(writer, repeatLength);
-                Write7BitEncodedInt(writer, unitSize);
-                if (!isFull)
-                    Write7BitEncodedInt(writer, (int)mask);
-
-                int dataLen = changedCount * (isUniform ? 1 : repeatLength);
-                Span<byte> packed = tempBuffer[..dataLen];
-                if (isFull)
-                {
-                    xorData.Slice(pos, dataLen).CopyTo(packed);
-                }
-                else
-                {
-                    Span<int> posList = posListBuffer[..changedCount];
-                    int pp = 0;
-                    for (int ii = 0; ii < unitSize; ii++)
-                        if ((mask & (1u << ii)) != 0)
-                            posList[pp++] = ii;
-                    int cursor = 0;
-                    int maxRr = isUniform ? 1 : repeatLength;
-                    for (int rr = 0; rr < maxRr; rr++)
-                    for (int jj = 0; jj < changedCount; jj++)
-                        packed[cursor++] = xorData[pos + rr * unitSize + posList[jj]];
-                }
-
-                writer.Write(packed);
-
-                float density = isFull ? 1.0f : (changedCount / (float)unitSize);
-                int totalMotif = counts.UniformMotifCount + counts.VaryingMotifCount + 1;
-                float newAvg = (counts.AverageMaskDensity * (totalMotif - 1) + density) / totalMotif;
-                if (isUniform)
-                {
-                    counts.UniformMotifCount++;
-                    counts.AverageMaskDensity = newAvg;
-                }
-                else
-                {
-                    counts.VaryingMotifCount++;
-                    counts.AverageMaskDensity = newAvg;
-                }
-
-                pos += c.coveredLength;
-                continue;
-            }
-
-            // Fallback RLE run
-            bool isZero = xorData[pos] == 0;
-            int runLen = 1;
-            while (pos + runLen < xorData.Length && (xorData[pos + runLen] == 0) == isZero) runLen++;
-            byte op = isZero ? RLE_ZeroRun : RLE_NonZeroRun;
-            oneByteSpan[0] = op;
-            writer.Write(oneByteSpan);
-            Write7BitEncodedInt(writer, runLen);
-            if (!isZero)
-            {
-                Span<byte> xorTemp = tempBuffer[..runLen];
-                xorData.Slice(pos, runLen).CopyTo(xorTemp);
-                writer.Write(xorTemp);
-            }
-
-            if (isZero) counts.ZeroRunCount++;
-            else counts.NonZeroRunCount++;
-            pos += runLen;
-        }
-
-        return counts;
-    }
-
-    private static bool ApplyRLEDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> delta, Span<byte> output,
-        DeltaOptions options)
-    {
-        // Copy base data
-        int copyLength = Math.Min(oldData.Length, output.Length);
-        oldData[..copyLength].CopyTo(output[..copyLength]);
-
-        // Clear any extended portion
-        if (output.Length > oldData.Length)
-            output[oldData.Length..].Clear();
-
-        // Apply RLE operations
-        var reader = new SpanReader(delta);
-        int pos = 0; // Start at beginning of overlapping region
-
-        Span<int> posListBuffer = stackalloc int[32];
-
-        while (reader.Remaining > 0)
-        {
-            if (!reader.TryReadByte(out byte opcode))
-                return false;
-
-            switch (opcode)
-            {
-                case RLE_ZeroRun:
-                    if (!reader.TryRead7BitEncodedInt(out int zeroCount))
-                        return false;
-                    pos += zeroCount;
-                    if (pos > output.Length) return false;
-                    break;
-
-                case RLE_NonZeroRun:
-                    if (!reader.TryRead7BitEncodedInt(out int nonZeroCount))
-                        return false;
-                    if (pos + nonZeroCount > output.Length) return false;
-                    ReadOnlySpan<byte> xorData = reader.Read(nonZeroCount);
-                    ApplyXORDelta(output, xorData, pos, nonZeroCount, options);
-                    pos += nonZeroCount;
-                    break;
-
-                case RLE_Extension:
-                    if (!reader.TryRead7BitEncodedInt(out int extLen))
-                        return false;
-                    if (pos + extLen > output.Length) return false;
-                    ReadOnlySpan<byte> extData = reader.Read(extLen);
-                    extData.CopyTo(output.Slice(pos, extLen));
-                    pos += extLen;
-                    break;
-
-                case RLE_Truncation:
-                    if (!reader.TryRead7BitEncodedInt(out int truncLen))
-                        return false;
-                    // The output is already sized to truncLen from header
-                    // No data to copy, just ensure no more reading
-                    pos = truncLen;
-                    break;
-
-                case RLE_UniformMotifRepeat:
-                {
-                    if (!reader.TryReadByte(out byte flags)) return false;
-                    if (!reader.TryRead7BitEncodedInt(out int repeatLength)) return false;
-                    if (repeatLength < MotifMinStreak) return false;
-                    if (!reader.TryRead7BitEncodedInt(out int unitSize)) return false;
-                    if (unitSize < 1 || unitSize > 32) return false;
-
-                    bool isMasked = (flags & 0x80) != 0;
-                    uint mask = 0;
-                    int changedCount;
-                    if (isMasked)
-                    {
-                        if (!reader.TryRead7BitEncodedInt(out int maskInt)) return false;
-                        mask = (uint)maskInt;
-                        changedCount = BitOperations.PopCount(mask);
-                    }
-                    else
-                    {
-                        changedCount = unitSize;
-                        mask = (1u << unitSize) - 1u;
-                    }
-
-                    ReadOnlySpan<byte> uniformXorData = reader.Read(changedCount);
-                    if (pos + unitSize * repeatLength > output.Length) return false;
-
-                    Span<int> posList = posListBuffer[..changedCount];
-                    int c = 0;
-                    for (int i = 0; i < unitSize; i++)
-                        if ((mask & (1u << i)) != 0 || !isMasked)
-                            posList[c++] = i;
-
-                    for (int r = 0; r < repeatLength; r++)
-                    for (int j = 0; j < changedCount; j++)
-                        output[pos + r * unitSize + posList[j]] ^= uniformXorData[j];
-                    pos += unitSize * repeatLength;
-                }
-                    break;
-
-                case RLE_VaryingMotifRepeat:
-                {
-                    if (!reader.TryReadByte(out byte flags)) return false;
-                    if (!reader.TryRead7BitEncodedInt(out int repeatLength)) return false;
-                    if (repeatLength < MotifMinStreak) return false;
-                    if (!reader.TryRead7BitEncodedInt(out int unitSize)) return false;
-                    if (unitSize < 1 || unitSize > 32) return false;
-
-                    bool isMasked = (flags & 0x80) != 0;
-                    uint mask = 0;
-                    int changedCount;
-                    if (isMasked)
-                    {
-                        if (!reader.TryRead7BitEncodedInt(out int maskInt)) return false;
-                        mask = (uint)maskInt;
-                        changedCount = BitOperations.PopCount(mask);
-                    }
-                    else
-                    {
-                        changedCount = unitSize;
-                        mask = (1u << unitSize) - 1u;
-                    }
-
-                    int totalXorDataSize = changedCount * repeatLength;
-                    ReadOnlySpan<byte> allXorData = reader.Read(totalXorDataSize);
-                    if (pos + unitSize * repeatLength > output.Length) return false;
-
-                    Span<int> posList = posListBuffer[..changedCount];
-                    int c = 0;
-                    for (int i = 0; i < unitSize; i++)
-                        if ((mask & (1u << i)) != 0 || !isMasked)
-                            posList[c++] = i;
-
-                    int dataCursor = 0;
-                    for (int r = 0; r < repeatLength; r++)
-                    {
-                        for (int j = 0; j < changedCount; j++)
-                            output[pos + r * unitSize + posList[j]] ^= allXorData[dataCursor + j];
-                        dataCursor += changedCount;
-                    }
-
-                    pos += unitSize * repeatLength;
-                }
-                    break;
-
-                default:
-                    return false; // Invalid opcode
-            }
-        }
-
-        return pos == output.Length;
-    }
 
     private static void Write7BitEncodedInt(IBufferWriter<byte> writer, int value)
     {
@@ -1103,76 +678,7 @@ public static class DeltaZor
 
     #region Helper Types
 
-    /// <summary>
-    /// Efficient reader for spans with 7-bit encoding support.
-    /// </summary>
-    private ref struct SpanReader
-    {
-        public ReadOnlySpan<byte> _span;
-        public int _position;
 
-        public SpanReader(ReadOnlySpan<byte> span)
-        {
-            _span = span;
-            _position = 0;
-        }
-
-        public int Remaining => _span.Length - _position;
-
-        public bool TryReadByte(out byte value)
-        {
-            if (_position >= _span.Length)
-            {
-                value = 0;
-                return false;
-            }
-
-            value = _span[_position++];
-            return true;
-        }
-
-        public bool TryReadInt32(out int value)
-        {
-            if (_position + 4 > _span.Length)
-            {
-                value = 0;
-                return false;
-            }
-
-            value = BitConverter.ToInt32(_span[_position..]);
-            _position += 4;
-            return true;
-        }
-
-        public bool TryRead7BitEncodedInt(out int value)
-        {
-            value = 0;
-            int shift = 0;
-            byte b;
-
-            do
-            {
-                if (!TryReadByte(out b))
-                    return false;
-
-                value |= (b & 0x7F) << shift;
-                shift += 7;
-
-                if (shift > 35) // Prevent overflow
-                    return false;
-            } while ((b & 0x80) != 0);
-
-            return true;
-        }
-
-        public ReadOnlySpan<byte> Read(int length)
-        {
-            if (_position + length > _span.Length) throw new EndOfStreamException("Insufficient data in delta");
-            var result = _span.Slice(_position, length);
-            _position += length;
-            return result;
-        }
-    }
 
     /// <summary>
     /// Simple CRC32 implementation for checksums.
