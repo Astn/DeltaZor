@@ -72,15 +72,15 @@ else
             // Assert: Emit correct motif type
             if (isUniform)
             {
-                Assert.True(stats.PatternCounts.UniformMotifCount >= 1);
-                Assert.Equal(0, stats.PatternCounts.VaryingMotifCount);
+                Assert.True(stats.OpCodeCounts.UniformMotifCount >= 1);
+                Assert.Equal(0, stats.OpCodeCounts.VaryingMotifCount);
             }
             else
             {
-                Assert.True(stats.PatternCounts.VaryingMotifCount >= 1);
-                Assert.Equal(0, stats.PatternCounts.UniformMotifCount);
+                Assert.True(stats.OpCodeCounts.VaryingMotifCount >= 1);
+                Assert.Equal(0, stats.OpCodeCounts.UniformMotifCount);
             }
-            Assert.True(stats.PatternCounts.AverageMaskDensity <= 0.5f); // Density check
+            Assert.True(stats.OpCodeCounts.AverageMaskDensity <= 0.5f); // Density check
 
             // Verify application
             var output = new byte[totalLength];
@@ -107,14 +107,14 @@ _output.WriteLine("Output: " + string.Join(", ", output));
             // Act
             var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);
 
-            _output.WriteLine($"UniformMotifCount: {stats.PatternCounts.UniformMotifCount}");
-            _output.WriteLine($"VaryingMotifCount: {stats.PatternCounts.VaryingMotifCount}");
-            _output.WriteLine($"NonZeroRunCount: {stats.PatternCounts.NonZeroRunCount}");
-            _output.WriteLine($"ZeroRunCount: {stats.PatternCounts.ZeroRunCount}");
+            _output.WriteLine($"UniformMotifCount: {stats.OpCodeCounts.UniformMotifCount}");
+            _output.WriteLine($"VaryingMotifCount: {stats.OpCodeCounts.VaryingMotifCount}");
+            _output.WriteLine($"NonZeroRunCount: {stats.OpCodeCounts.NonZeroRunCount}");
+            _output.WriteLine($"ZeroRunCount: {stats.OpCodeCounts.ZeroRunCount}");
             _output.WriteLine($"UsedRLE: {stats.UsedRLE}");
 
             // Assert: No motif (streak=1 <2), falls back to full replace due to high overhead
-            Assert.Equal(0, stats.PatternCounts.UniformMotifCount + stats.PatternCounts.VaryingMotifCount);
+            Assert.Equal(0, stats.OpCodeCounts.UniformMotifCount + stats.OpCodeCounts.VaryingMotifCount);
             Assert.False(stats.UsedRLE);
 
             // Verify application
@@ -152,8 +152,8 @@ _output.WriteLine("Output: " + string.Join(", ", output));
             // Assert: For large repeats, expect motif if within cap, or fallback/partial
             // Note: Implementation caps at 50, so >50 should fallback or emit multiple
             int expectedMotifs = repeatCount <= 50 ? 1 : 0; // Simplified; actual may emit partial
-            Assert.True(stats.PatternCounts.UniformMotifCount >= expectedMotifs);
-            Assert.Equal(0, stats.PatternCounts.VaryingMotifCount);
+            Assert.True(stats.OpCodeCounts.UniformMotifCount >= expectedMotifs);
+            Assert.Equal(0, stats.OpCodeCounts.VaryingMotifCount);
 
             // Verify application
             var output = new byte[totalLength];
@@ -184,8 +184,8 @@ public void MotifDetection_HighDensity_NoEmission()
             var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);
 
             // Assert: No motif emitted, falls back to full replace due to high overhead
-            Assert.Equal(0, stats.PatternCounts.UniformMotifCount);
-            Assert.Equal(0, stats.PatternCounts.VaryingMotifCount);
+            Assert.Equal(0, stats.OpCodeCounts.UniformMotifCount);
+            Assert.Equal(0, stats.OpCodeCounts.VaryingMotifCount);
             Assert.False(stats.UsedRLE);
         }
 
@@ -205,9 +205,9 @@ public void MotifDetection_HighDensity_NoEmission()
             var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);
 
             // Assert: Fallback to RLE if savings <=0.05
-_output.WriteLine($"LowSavings Stats: Uniform={stats.PatternCounts.UniformMotifCount}, Varying={stats.PatternCounts.VaryingMotifCount}, UsedRLE={stats.UsedRLE}, Density={stats.PatternCounts.AverageMaskDensity}, DeltaSize={stats.DeltaSize}, CompressionRatio={stats.CompressionRatio}, NonZeroRun={stats.PatternCounts.NonZeroRunCount}");
-            Assert.Equal(0, stats.PatternCounts.UniformMotifCount + stats.PatternCounts.VaryingMotifCount);
-            Assert.True(stats.PatternCounts.NonZeroRunCount > 0);
+_output.WriteLine($"LowSavings Stats: Uniform={stats.OpCodeCounts.UniformMotifCount}, Varying={stats.OpCodeCounts.VaryingMotifCount}, UsedRLE={stats.UsedRLE}, Density={stats.OpCodeCounts.AverageMaskDensity}, DeltaSize={stats.DeltaSize}, CompressionRatio={stats.CompressionRatio}, NonZeroRun={stats.OpCodeCounts.NonZeroRunCount}");
+            Assert.Equal(0, stats.OpCodeCounts.UniformMotifCount + stats.OpCodeCounts.VaryingMotifCount);
+            Assert.True(stats.OpCodeCounts.NonZeroRunCount > 0);
 
             // Verify application
             var output = new byte[newData.Length];
@@ -248,9 +248,9 @@ _output.WriteLine("Output: " + string.Join(", ", output));
             var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);
 
             // Assert: Motif emitted; density 0.5 for masked, 1.0 for full (but still emits if savings > threshold)
-            Assert.True(stats.PatternCounts.UniformMotifCount >= 1);
+            Assert.True(stats.OpCodeCounts.UniformMotifCount >= 1);
             float expectedDensity = useMasked ? 0.5f : 1.0f;
-            Assert.Equal(expectedDensity, stats.PatternCounts.AverageMaskDensity, 1); // Tolerance for full
+            Assert.Equal(expectedDensity, stats.OpCodeCounts.AverageMaskDensity, 1); // Tolerance for full
 
             // Verify application
             var output = new byte[totalLength];
@@ -355,8 +355,8 @@ _output.WriteLine("Output: " + string.Join(", ", output));
             var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);
 
             // Assert: No motif (exceeds cap)
-            Assert.Equal(0, stats.PatternCounts.UniformMotifCount + stats.PatternCounts.VaryingMotifCount);
-            Assert.True(stats.PatternCounts.NonZeroRunCount > 0);
+            Assert.Equal(0, stats.OpCodeCounts.UniformMotifCount + stats.OpCodeCounts.VaryingMotifCount);
+            Assert.True(stats.OpCodeCounts.NonZeroRunCount > 0);
 
             // Verify application
             var output = new byte[totalLength];
@@ -382,12 +382,12 @@ _output.WriteLine("Output: " + string.Join(", ", output));
             var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);
 
             // Assert: If motif emitted, average density should be 0.25
-            if (stats.PatternCounts.UniformMotifCount > 0)
+            if (stats.OpCodeCounts.UniformMotifCount > 0)
             {
-                Assert.Equal(0.25f, stats.PatternCounts.AverageMaskDensity, 2);
+                Assert.Equal(0.25f, stats.OpCodeCounts.AverageMaskDensity, 2);
             }
             // Even if not, test ensures stats are populated
-            Assert.True(stats.PatternCounts.AverageMaskDensity >= 0);
+            Assert.True(stats.OpCodeCounts.AverageMaskDensity >= 0);
         }
 
         [Fact]
@@ -408,8 +408,8 @@ _output.WriteLine("Output: " + string.Join(", ", output));
             var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);
 
             // Assert: No motifs, falls back to full replace due to high overhead
-            Assert.Equal(0, stats.PatternCounts.UniformMotifCount);
-            Assert.Equal(0, stats.PatternCounts.VaryingMotifCount);
+            Assert.Equal(0, stats.OpCodeCounts.UniformMotifCount);
+            Assert.Equal(0, stats.OpCodeCounts.VaryingMotifCount);
             Assert.False(stats.UsedRLE);
 
             // Verify application
@@ -436,9 +436,9 @@ _output.WriteLine("Output: " + string.Join(", ", output));
             var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);
 
             // Assert: Emits uniform motif (masked, low density)
-            Assert.True(stats.PatternCounts.UniformMotifCount >= 1);
-            Assert.Equal(0, stats.PatternCounts.VaryingMotifCount);
-            Assert.True(stats.PatternCounts.AverageMaskDensity <= 0.5f); // Density check
+            Assert.True(stats.OpCodeCounts.UniformMotifCount >= 1);
+            Assert.Equal(0, stats.OpCodeCounts.VaryingMotifCount);
+            Assert.True(stats.OpCodeCounts.AverageMaskDensity <= 0.5f); // Density check
 
             // Verify application
             var output = new byte[12];
@@ -464,9 +464,9 @@ _output.WriteLine("Output: " + string.Join(", ", output));
             var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);
 
             // Assert: Emits varying motif (not uniform due to different values)
-            Assert.True(stats.PatternCounts.VaryingMotifCount >= 1);
-            Assert.Equal(0, stats.PatternCounts.UniformMotifCount);
-            Assert.True(stats.PatternCounts.AverageMaskDensity < 0.5f);
+            Assert.True(stats.OpCodeCounts.VaryingMotifCount >= 1);
+            Assert.Equal(0, stats.OpCodeCounts.UniformMotifCount);
+            Assert.True(stats.OpCodeCounts.AverageMaskDensity < 0.5f);
 
             // Verify application
             var output = new byte[12];
@@ -493,9 +493,9 @@ _output.WriteLine("Output: " + string.Join(", ", output));
             var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);
 
             // Assert: Emits uniform full motif (density prune skipped for full mode)
-_output.WriteLine($"FullMode Stats: Uniform={stats.PatternCounts.UniformMotifCount}, Varying={stats.PatternCounts.VaryingMotifCount}, UsedRLE={stats.UsedRLE}, Density={stats.PatternCounts.AverageMaskDensity}, DeltaSize={stats.DeltaSize}, CompressionRatio={stats.CompressionRatio}");
-            Assert.True(stats.PatternCounts.UniformMotifCount >= 1);
-            Assert.Equal(1.0f, stats.PatternCounts.AverageMaskDensity, 0.1f); // Tolerance
+_output.WriteLine($"FullMode Stats: Uniform={stats.OpCodeCounts.UniformMotifCount}, Varying={stats.OpCodeCounts.VaryingMotifCount}, UsedRLE={stats.UsedRLE}, Density={stats.OpCodeCounts.AverageMaskDensity}, DeltaSize={stats.DeltaSize}, CompressionRatio={stats.CompressionRatio}");
+            Assert.True(stats.OpCodeCounts.UniformMotifCount >= 1);
+            Assert.Equal(1.0f, stats.OpCodeCounts.AverageMaskDensity, 0.1f); // Tolerance
 
             // Verify application
             var output = new byte[20];
@@ -524,8 +524,8 @@ _output.WriteLine("Output: " + string.Join(", ", output));
             var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);
 
             // Assert: Emits at least 1 motif (capped behavior)
-            Assert.True(stats.PatternCounts.UniformMotifCount >= 1);
-            Assert.True(stats.PatternCounts.AverageMaskDensity == 0.5f);
+            Assert.True(stats.OpCodeCounts.UniformMotifCount >= 1);
+            Assert.True(stats.OpCodeCounts.AverageMaskDensity == 0.5f);
 
             // Verify application
             var output = new byte[totalLength];
@@ -552,7 +552,7 @@ _output.WriteLine("Output: " + string.Join(", ", output));
             var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);
 
             // Assert: No motif emitted (pruned by density >=0.7), falls back to full replace due to high overhead
-            Assert.Equal(0, stats.PatternCounts.UniformMotifCount + stats.PatternCounts.VaryingMotifCount);
+            Assert.Equal(0, stats.OpCodeCounts.UniformMotifCount + stats.OpCodeCounts.VaryingMotifCount);
             Assert.False(stats.UsedRLE);
 
             // Verify application
@@ -588,18 +588,18 @@ _output.WriteLine("Output: " + string.Join(", ", output));
             var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);
             
             // Debug output to see what's happening
-            _output.WriteLine($"UniformMotifCount: {stats.PatternCounts.UniformMotifCount}");
-            _output.WriteLine($"VaryingMotifCount: {stats.PatternCounts.VaryingMotifCount}");
-            _output.WriteLine($"AverageMaskDensity: {stats.PatternCounts.AverageMaskDensity}");
-            _output.WriteLine($"NonZeroRunCount: {stats.PatternCounts.NonZeroRunCount}");
-            _output.WriteLine($"ZeroRunCount: {stats.PatternCounts.ZeroRunCount}");
+            _output.WriteLine($"UniformMotifCount: {stats.OpCodeCounts.UniformMotifCount}");
+            _output.WriteLine($"VaryingMotifCount: {stats.OpCodeCounts.VaryingMotifCount}");
+            _output.WriteLine($"AverageMaskDensity: {stats.OpCodeCounts.AverageMaskDensity}");
+            _output.WriteLine($"NonZeroRunCount: {stats.OpCodeCounts.NonZeroRunCount}");
+            _output.WriteLine($"ZeroRunCount: {stats.OpCodeCounts.ZeroRunCount}");
             _output.WriteLine($"UsedRLE: {stats.UsedRLE}");
             _output.WriteLine($"CompressionType: {stats.CompressionType}");
             _output.WriteLine($"Delta size: {delta.Length}");
 
             // Assert: Emits motif despite small length
-            Assert.True(stats.PatternCounts.UniformMotifCount >= 1, $"Expected at least 1 uniform motif, got {stats.PatternCounts.UniformMotifCount}");
-            Assert.True(stats.PatternCounts.AverageMaskDensity == 0.5f, $"Expected density 0.5, got {stats.PatternCounts.AverageMaskDensity}");
+            Assert.True(stats.OpCodeCounts.UniformMotifCount >= 1, $"Expected at least 1 uniform motif, got {stats.OpCodeCounts.UniformMotifCount}");
+            Assert.True(stats.OpCodeCounts.AverageMaskDensity == 0.5f, $"Expected density 0.5, got {stats.OpCodeCounts.AverageMaskDensity}");
 
             // Verify application
             var output = new byte[12];

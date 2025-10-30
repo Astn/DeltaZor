@@ -24,10 +24,10 @@ namespace DZ.Tests.UnitTests
 
             Assert.Equal(5, outputLength); // Same length
             Assert.Equal(0x00, compressionType); // RLE compression
-            Assert.Equal(1, stats.PatternCounts.ZeroRunCount); // One zero run for identical data
-            Assert.Equal(0, stats.PatternCounts.NonZeroRunCount);
-            Assert.Equal(0, stats.PatternCounts.ExtensionCount);
-            Assert.Equal(0, stats.PatternCounts.TruncationCount);
+            Assert.Equal(1, stats.OpCodeCounts.ZeroRunCount); // One zero run for identical data
+            Assert.Equal(0, stats.OpCodeCounts.NonZeroRunCount);
+            Assert.Equal(0, stats.OpCodeCounts.ExtensionCount);
+            Assert.Equal(0, stats.OpCodeCounts.TruncationCount);
         }
 
         [Fact]
@@ -50,10 +50,10 @@ namespace DZ.Tests.UnitTests
             // May choose RLE or full replace depending on compression analysis
             if (compressionType == 0x01) // Full replace
             {
-                Assert.Equal(0, stats.PatternCounts.ZeroRunCount);
-                Assert.Equal(0, stats.PatternCounts.NonZeroRunCount);
-                Assert.Equal(0, stats.PatternCounts.ExtensionCount);
-                Assert.Equal(0, stats.PatternCounts.TruncationCount);
+                Assert.Equal(0, stats.OpCodeCounts.ZeroRunCount);
+                Assert.Equal(0, stats.OpCodeCounts.NonZeroRunCount);
+                Assert.Equal(0, stats.OpCodeCounts.ExtensionCount);
+                Assert.Equal(0, stats.OpCodeCounts.TruncationCount);
             }
         }
 
@@ -92,10 +92,10 @@ namespace DZ.Tests.UnitTests
             Assert.Equal(newData, output);
             Assert.Equal(7, applyStats.NewSize);
             // Should have one zero run for identical prefix and one extension
-            Assert.Equal(1, createStats.PatternCounts.ZeroRunCount);
-            Assert.Equal(0, createStats.PatternCounts.NonZeroRunCount);
-            Assert.Equal(1, createStats.PatternCounts.ExtensionCount);
-            Assert.Equal(0, createStats.PatternCounts.TruncationCount);
+            Assert.Equal(1, createStats.OpCodeCounts.ZeroRunCount);
+            Assert.Equal(0, createStats.OpCodeCounts.NonZeroRunCount);
+            Assert.Equal(1, createStats.OpCodeCounts.ExtensionCount);
+            Assert.Equal(0, createStats.OpCodeCounts.TruncationCount);
         }
 
         [Fact]
@@ -115,10 +115,10 @@ namespace DZ.Tests.UnitTests
             Assert.Equal(newData, output);
             Assert.Equal(5, applyStats.NewSize);
             // Should have one zero run for identical prefix and one truncation
-            Assert.Equal(1, createStats.PatternCounts.ZeroRunCount);
-            Assert.Equal(0, createStats.PatternCounts.NonZeroRunCount);
-            Assert.Equal(0, createStats.PatternCounts.ExtensionCount);
-            Assert.Equal(1, createStats.PatternCounts.TruncationCount);
+            Assert.Equal(1, createStats.OpCodeCounts.ZeroRunCount);
+            Assert.Equal(0, createStats.OpCodeCounts.NonZeroRunCount);
+            Assert.Equal(0, createStats.OpCodeCounts.ExtensionCount);
+            Assert.Equal(1, createStats.OpCodeCounts.TruncationCount);
         }
     }
 }

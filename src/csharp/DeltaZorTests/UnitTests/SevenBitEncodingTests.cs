@@ -27,10 +27,10 @@ namespace DZ.Tests.UnitTests
             Assert.Equal(newData, output);
             Assert.Equal(200, applyStats.NewSize);
             // Should have one non-zero run for the 150 changed bytes and one zero run for the 50 unchanged bytes
-            Assert.Equal(1, createStats.PatternCounts.ZeroRunCount);
-            Assert.Equal(1, createStats.PatternCounts.NonZeroRunCount);
-            Assert.Equal(0, createStats.PatternCounts.ExtensionCount);
-            Assert.Equal(0, createStats.PatternCounts.TruncationCount);
+            Assert.Equal(1, createStats.OpCodeCounts.ZeroRunCount);
+            Assert.Equal(1, createStats.OpCodeCounts.NonZeroRunCount);
+            Assert.Equal(0, createStats.OpCodeCounts.ExtensionCount);
+            Assert.Equal(0, createStats.OpCodeCounts.TruncationCount);
         }
 
         [Fact(Skip = "Not yet implemented")]

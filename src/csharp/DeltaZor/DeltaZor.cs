@@ -155,7 +155,7 @@ public static class DeltaZor
         public double ChangeDensity { get; init; }
         public string CompressionType { get; init; }
         public bool UsedRLE { get; init; }
-        public PatternCounts PatternCounts { get; init; }
+        public OpCodeCounts OpCodeCounts { get; init; }
     }
 
     private readonly struct MotifCandidate
@@ -195,14 +195,14 @@ public static class DeltaZor
     /// <summary>
     /// Counts of different opcodes emitted during delta creation.
     /// </summary>
-    public record struct PatternCounts
+    public record struct OpCodeCounts
     {
         public int ZeroRunCount { get; set; } // 0x00 (Implemented)
         public int NonZeroRunCount { get; set; } // 0x01 (Implemented)
         public int ExtensionCount { get; set; } // 0x02 (Implemented)
         public int TruncationCount { get; set; } // 0x03 (Implemented)
-        public int UniformMotifCount { get; set; } // 0x04 (Partial)
-        public int VaryingMotifCount { get; set; } // 0x05 (Partial)
+        public int UniformMotifCount { get; set; } // 0x04 (Implemented)
+        public int VaryingMotifCount { get; set; } // 0x05 (Implemented)
         public float AverageMaskDensity { get; set; } // Avg popcount(mask)/unitSize for motif sparsity
 
         public int TotalPatternCount => ZeroRunCount + NonZeroRunCount + ExtensionCount + TruncationCount +
@@ -406,7 +406,7 @@ public static class DeltaZor
 
         // Use ArrayBufferWriter: Attempt RLE, fallback to full if worse
         var writer = new ArrayBufferWriter<byte>();
-        var patternCounts = default(PatternCounts);
+        var patternCounts = default(OpCodeCounts);
         bool usedRLE = false;
 
         if (useRLE)
@@ -465,7 +465,7 @@ public static class DeltaZor
             ChangeDensity = density, // Cached
             CompressionType = usedRLE ? "RLE" : "FullReplace",
             UsedRLE = usedRLE,
-            PatternCounts = patternCounts
+            OpCodeCounts = patternCounts
         };
 
         return true;
@@ -577,10 +577,10 @@ public static class DeltaZor
     }
 
 
-    private static PatternCounts CreateRLEDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData,
+    private static OpCodeCounts CreateRLEDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData,
         IBufferWriter<byte> writer, DeltaOptions options)
     {
-        var patternCounts = new PatternCounts();
+        var patternCounts = new OpCodeCounts();
         int minLength = Math.Min(oldData.Length, newData.Length);
         Span<byte> oneByteSpan = stackalloc byte[1];
         Span<byte> tempBuffer = stackalloc byte[options.MaxStackBufferSize];
@@ -791,8 +791,8 @@ public static class DeltaZor
         return null;
     }
 
-    private static PatternCounts EncodeXorWithMotifs(ReadOnlySpan<byte> xorData, IBufferWriter<byte> writer,
-        DeltaOptions options, PatternCounts counts)
+    private static OpCodeCounts EncodeXorWithMotifs(ReadOnlySpan<byte> xorData, IBufferWriter<byte> writer,
+        DeltaOptions options, OpCodeCounts counts)
     {
         int pos = 0;
         Span<byte> oneByteSpan = stackalloc byte[1];

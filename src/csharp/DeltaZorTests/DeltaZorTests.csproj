@@ -21,6 +21,7 @@
 
     <ItemGroup>
       <ProjectReference Include="..\DeltaZor.Shared\DeltaZor.Shared.csproj" />
+      <ProjectReference Include="..\DeltaZor.TestGen\DeltaZor.TestGen.csproj" />
       <ProjectReference Include="..\DeltaZor\DeltaZor.csproj" />
     </ItemGroup>
 

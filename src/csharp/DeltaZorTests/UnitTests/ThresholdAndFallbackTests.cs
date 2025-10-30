@@ -102,16 +102,16 @@ namespace DZ.Tests.UnitTests
             if (compressionTypeLow == 0x00) // RLE
             {
                 // Low change density should have some pattern counts
-                Assert.True(statsLow.PatternCounts.TotalPatternCount > 0);
+                Assert.True(statsLow.OpCodeCounts.TotalPatternCount > 0);
             }
 
             if (compressionTypeHigh == 0x01) // Full replace
             {
                 // High change density should have no pattern counts
-                Assert.Equal(0, statsHigh.PatternCounts.ZeroRunCount);
-                Assert.Equal(0, statsHigh.PatternCounts.NonZeroRunCount);
-                Assert.Equal(0, statsHigh.PatternCounts.ExtensionCount);
-                Assert.Equal(0, statsHigh.PatternCounts.TruncationCount);
+                Assert.Equal(0, statsHigh.OpCodeCounts.ZeroRunCount);
+                Assert.Equal(0, statsHigh.OpCodeCounts.NonZeroRunCount);
+                Assert.Equal(0, statsHigh.OpCodeCounts.ExtensionCount);
+                Assert.Equal(0, statsHigh.OpCodeCounts.TruncationCount);
             }
         }
 

@@ -31,10 +31,10 @@ namespace DZ.Tests.UnitTests
             // For this specific case, RLE should be more efficient than full replace
             Assert.True(actualRleSize <= newData.Length + 10); // Allow some overhead for encoding
             // Should have 2 zero runs (positions 0-1 and 4-9) and 1 non-zero run (positions 2-3)
-            Assert.Equal(2, stats.PatternCounts.ZeroRunCount);
-            Assert.Equal(1, stats.PatternCounts.NonZeroRunCount);
-            Assert.Equal(0, stats.PatternCounts.ExtensionCount);
-            Assert.Equal(0, stats.PatternCounts.TruncationCount);
+            Assert.Equal(2, stats.OpCodeCounts.ZeroRunCount);
+            Assert.Equal(1, stats.OpCodeCounts.NonZeroRunCount);
+            Assert.Equal(0, stats.OpCodeCounts.ExtensionCount);
+            Assert.Equal(0, stats.OpCodeCounts.TruncationCount);
         }
 
         [Fact]

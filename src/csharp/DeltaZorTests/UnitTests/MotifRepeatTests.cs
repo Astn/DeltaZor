@@ -140,20 +140,20 @@ namespace DZ.Tests.UnitTests
 
             // Assert
             // Print out the pattern counts for debugging
-            Console.WriteLine($"ZeroRunCount: {stats.PatternCounts.ZeroRunCount}");
-            Console.WriteLine($"NonZeroRunCount: {stats.PatternCounts.NonZeroRunCount}");
-            Console.WriteLine($"ExtensionCount: {stats.PatternCounts.ExtensionCount}");
-            Console.WriteLine($"TruncationCount: {stats.PatternCounts.TruncationCount}");
-            Console.WriteLine($"ChannelRunCount: {stats.PatternCounts.ChannelRunCount}");
-            Console.WriteLine($"UniformMotifCount: {stats.PatternCounts.UniformMotifCount}");
-            Console.WriteLine($"VaryingMotifCount: {stats.PatternCounts.VaryingMotifCount}");
-            Console.WriteLine($"TotalPatternCount: {stats.PatternCounts.TotalPatternCount}");
+            Console.WriteLine($"ZeroRunCount: {stats.OpCodeCounts.ZeroRunCount}");
+            Console.WriteLine($"NonZeroRunCount: {stats.OpCodeCounts.NonZeroRunCount}");
+            Console.WriteLine($"ExtensionCount: {stats.OpCodeCounts.ExtensionCount}");
+            Console.WriteLine($"TruncationCount: {stats.OpCodeCounts.TruncationCount}");
+            Console.WriteLine($"ChannelRunCount: {stats.OpCodeCounts.ChannelRunCount}");
+            Console.WriteLine($"UniformMotifCount: {stats.OpCodeCounts.UniformMotifCount}");
+            Console.WriteLine($"VaryingMotifCount: {stats.OpCodeCounts.VaryingMotifCount}");
+            Console.WriteLine($"TotalPatternCount: {stats.OpCodeCounts.TotalPatternCount}");
             Console.WriteLine($"UsedRLE: {stats.UsedRLE}");
             Console.WriteLine($"CompressionType: {stats.CompressionType}");
             
             // We should have some pattern counts since we have changes
             // Expecting at least 1 NonZeroRunCount and some ZeroRunCount
-            Assert.True(stats.PatternCounts.NonZeroRunCount > 0 || stats.PatternCounts.ZeroRunCount > 0);
+            Assert.True(stats.OpCodeCounts.NonZeroRunCount > 0 || stats.OpCodeCounts.ZeroRunCount > 0);
             Assert.True(stats.UsedRLE);
             Assert.Equal("RLE", stats.CompressionType);
         }
@@ -182,7 +182,7 @@ namespace DZ.Tests.UnitTests
             
             // Assert
             // Check that the UniformMotifCount property exists and is accessible
-            Assert.True(stats.PatternCounts.UniformMotifCount >= 0);
+            Assert.True(stats.OpCodeCounts.UniformMotifCount >= 0);
         }
 
         [Fact]
@@ -209,7 +209,7 @@ namespace DZ.Tests.UnitTests
             
             // Assert
             // Check that the VaryingMotifCount property exists and is accessible
-            Assert.True(stats.PatternCounts.VaryingMotifCount >= 0);
+            Assert.True(stats.OpCodeCounts.VaryingMotifCount >= 0);
         }
 
     }
