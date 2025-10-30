@@ -23,125 +23,12 @@ const motif_min_streak: usize = 2;
 const max_motif_streak: usize = 50;
 
 
-
-pub fn calculateChangeDensity(old_data: []const u8, new_data: []const u8) f64 {
-    const min_len = @min(old_data.len, new_data.len);
-    var changes: usize = 0;
-    var i: usize = 0;
-    while (i < min_len) : (i += 1) {
-        if (old_data[i] != new_data[i]) changes += 1;
-    }
-    changes += @abs(@as(isize, @intCast(old_data.len)) - @as(isize, @intCast(new_data.len)));
-    return if (min_len > 0) @as(f64, @floatFromInt(changes)) / @as(f64, @floatFromInt(min_len)) else 1.0;
-}
-
 fn writeXORDelta(old_data: []const u8, new_data: []const u8, output: []u8, start: usize, length: usize, options: utils.Options) void {
     _ = options;
     var i: usize = 0;
     while (i < length) : (i += 1) {
         output[i] = old_data[start + i] ^ new_data[start + i];
     }
-}
-
-fn encodeXorWithMotifsEstimate(xor_data: []const u8, options: utils.Options, counts: *utils.OpCodeCounts) usize {
-    var pos: usize = 0;
-    var estimated_size: usize = 0;
-    while (pos < xor_data.len) {
-        if (options.enable_motif_detection) {
-            if (findMotifCandidate(xor_data, pos, options)) |candidate| {
-                const c = candidate;
-                const is_uniform = c.is_uniform;
-                const is_full = c.is_full;
-                const msk = c.mask;
-                const unit = c.unit_size;
-                const reps = c.repeat_length;
-                const changed = if (is_full) unit else popCount32(msk);
-                const data_len = changed * (if (is_uniform) 1 else reps);
-                estimated_size += 1; // opcode
-                estimated_size += 1; // flags
-                estimated_size += get7BitEncodedSize(reps);
-                estimated_size += get7BitEncodedSize(unit);
-                if (!is_full) {
-                    estimated_size += get7BitEncodedSize(@as(usize, @intCast(msk)));
-                }
-                estimated_size += data_len;
-                // update counts (same as write version)
-                const density = if (is_full) 1.0 else @as(f32, @floatFromInt(changed)) / @as(f32, @floatFromInt(unit));
-                const total_motif = counts.uniform_motif_count + counts.varying_motif_count + 1;
-                const new_avg = if (total_motif > 0) (counts.average_mask_density * @as(f32, @floatFromInt(total_motif - 1)) + density) / @as(f32, @floatFromInt(total_motif)) else 0.0;
-                if (is_uniform) {
-                    counts.uniform_motif_count += 1;
-                } else {
-                    counts.varying_motif_count += 1;
-                }
-                counts.average_mask_density = new_avg;
-                pos += c.covered_length;
-                continue;
-            }
-        }
-        // fallback basic RLE
-        const is_zero = xor_data[pos] == 0;
-        var run_len: usize = 1;
-        while (pos + run_len < xor_data.len and (xor_data[pos + run_len] == 0) == is_zero) run_len += 1;
-        estimated_size += 1; // opcode
-        estimated_size += get7BitEncodedSize(run_len);
-        if (!is_zero) {
-            estimated_size += run_len;
-        }
-        if (is_zero) {
-            counts.zero_run_count += 1;
-        } else {
-            counts.non_zero_run_count += 1;
-        }
-        pos += run_len;
-    }
-    return estimated_size;
-}
-
-fn createRLEDeltaEstimate(old_data: []const u8, new_data: []const u8, options: utils.Options, counts: *utils.OpCodeCounts) usize {
-    const min_len = @min(old_data.len, new_data.len);
-    var temp_buffer: [4096]u8 = undefined;
-    var estimated_size: usize = 0;
-
-    const use_full_xor = min_len <= options.max_stack_buffer_size and options.enable_motif_detection;
-    if (use_full_xor) {
-        const xor_buffer = temp_buffer[0..min_len];
-        writeXORDelta(old_data, new_data, xor_buffer, 0, min_len, options);
-        estimated_size += encodeXorWithMotifsEstimate(xor_buffer, options, counts);
-    } else {
-        // Streaming basic RLE estimate
-        var pos: usize = 0;
-        while (pos < min_len) {
-            const run_start = pos;
-            const is_zero = old_data[pos] == new_data[pos];
-            while (pos < min_len and (old_data[pos] == new_data[pos]) == is_zero) pos += 1;
-            const run_len = pos - run_start;
-            estimated_size += 1; // opcode
-            estimated_size += get7BitEncodedSize(run_len);
-            if (!is_zero) estimated_size += run_len;
-            if (is_zero) counts.zero_run_count += 1 else counts.non_zero_run_count += 1;
-        }
-    }
-
-    // Extension or truncation
-    if (new_data.len > old_data.len) {
-        const extension_len = new_data.len - old_data.len;
-        estimated_size += 1; // opcode
-        estimated_size += get7BitEncodedSize(extension_len);
-        estimated_size += extension_len;
-        counts.extension_count += 1;
-    } else if (new_data.len < old_data.len) {
-        estimated_size += 1; // opcode
-        estimated_size += get7BitEncodedSize(new_data.len);
-        counts.truncation_count += 1;
-    }
-
-    return estimated_size;
-}
-
-fn enhancedEstimateRLEWithMotifs(old_data: []const u8, new_data: []const u8, options: utils.Options) usize {
-    var counts = utils.OpCodeCounts{};
-    return createRLEDeltaEstimate(old_data, new_data, options, &counts);
 }
 
 fn encodeXorWithMotifsDirect(xor_data: []const u8, buffer: []u8, data_pos: *usize, options: utils.Options, counts: *utils.OpCodeCounts) void {
@@ -283,10 +170,7 @@ fn createRLEDeltaDirect(old_data: []const u8, new_data: []const u8, buffer: []u8
 }
 
 pub fn createDeltaWithStats(old_data: []const u8, new_data: []const u8, allocator: std.mem.Allocator, options: utils.Options, stats: *utils.Stats) ![]u8 {
-    const density = calculateChangeDensity(old_data, new_data);
-    const length_diff = @abs(@as(isize, @intCast(old_data.len)) - @as(isize, @intCast(new_data.len)));
-    const obvious_full = density > 0.95 and length_diff < @max(1, new_data.len / 10) and !options.enable_motif_detection;
-    const used_rle = !obvious_full;
+    const used_rle = true;
 
     // Conservative initial allocation for RLE attempt (large enough for worst-case RLE expansion)
     const len_diff = if (old_data.len > new_data.len) old_data.len - new_data.len else 0;
@@ -351,7 +235,7 @@ pub fn createDeltaWithStats(old_data: []const u8, new_data: []const u8, allocato
         .new_size = new_data.len,
         .delta_size = actual_size,
         .compression_ratio = if (new_data.len > 0) @as(f64, @floatFromInt(actual_size)) / @as(f64, @floatFromInt(new_data.len)) else 0.0,
-        .change_density = density,
+        .change_density = 0.0,
         .compression_type = if (final_used_rle) "RLE" else "FullReplace",
         .used_rle = final_used_rle,
         .op_code_counts = pattern_counts,

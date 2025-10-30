@@ -13,9 +13,7 @@ pub const DeltaZor = struct {
         return encoder.createDeltaWithStats(old_data, new_data, allocator, options, &stats);
     }
 
-    pub fn calculateChangeDensity(old_data: []const u8, new_data: []const u8) f64 {
-        return encoder.calculateChangeDensity(old_data, new_data);
-    }
+
 
     pub fn applyDelta(old_data: []const u8, delta: []const u8, output: []u8, allocator: std.mem.Allocator) !void {
         return decoder.applyDelta(old_data, delta, output, allocator);
