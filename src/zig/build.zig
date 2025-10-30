@@ -4,14 +4,37 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const encoder_mod = b.createModule(.{
+        .root_source_file = b.path("src/encoder.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const decoder_mod = b.createModule(.{
+        .root_source_file = b.path("src/decoder.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const utils_mod = b.createModule(.{
+        .root_source_file = b.path("src/utils.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const lib = b.addLibrary(.{
         .name = "deltazor",
         .root_module = b.createModule(.{
-			.root_source_file = b.path("src/deltazor.zig"),
-			.target = target,
-			.optimize = optimize
-		}),
-		.version = .{.major = 1, .minor = 0, .patch = 0},
+ 			.root_source_file = b.path("src/deltazor.zig"),
+ 			.target = target,
+ 			.optimize = optimize,
+ 			.imports = &.{
+ 				.{ .name = "encoder", .module = encoder_mod },
+ 				.{ .name = "decoder", .module = decoder_mod },
+ 				.{ .name = "utils", .module = utils_mod },
+ 			},
+ 		}),
+ 		.version = .{.major = 1, .minor = 0, .patch = 0},
     });
 
     b.installArtifact(lib);
@@ -26,11 +49,16 @@ pub fn build(b: *std.Build) void {
     generate_testdata.setName("generate-testdata");
 
     const tests = b.addTest(.{
-		.root_module = b.createModule(.{
-        	.root_source_file = b.path("src/tests.zig"),
-        	.optimize = optimize,
-			.target = target
-		}),
+ 		.root_module = b.createModule(.{
+         	.root_source_file = b.path("src/tests.zig"),
+         	.optimize = optimize,
+ 			.target = target,
+ 			.imports = &.{
+ 				.{ .name = "encoder", .module = encoder_mod },
+ 				.{ .name = "decoder", .module = decoder_mod },
+ 				.{ .name = "utils", .module = utils_mod },
+ 			},
+ 		}),
     });
 
     // Depend on testdata generation
