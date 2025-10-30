@@ -61,6 +61,8 @@ fn popCount32(m: u32) usize {
     return count;
 }
 
+
+
 pub const DeltaZor = struct {
     pub const Options = struct {
         compression_threshold: f64 = 0.95,
@@ -131,14 +133,7 @@ pub const DeltaZor = struct {
     return if (min_len > 0) @as(f64, @floatFromInt(changes)) / @as(f64, @floatFromInt(min_len)) else 1.0;
 }
 
-fn write7BitEncodedInt(writer: *std.ArrayList(u8), allocator: std.mem.Allocator, value: usize) !void {
-    var v = value;
-    while (v >= 128) {
-        try writer.append(allocator, @as(u8, @intCast((v & 0x7F) | 0x80)));
-        v >>= 7;
-    }
-    try writer.append(allocator, @as(u8, @intCast(v)));
-}
+
 
 fn writeXORDelta(old_data: []const u8, new_data: []const u8, output: []u8, start: usize, length: usize, options: Options) void {
     _ = options;
@@ -148,53 +143,123 @@ fn writeXORDelta(old_data: []const u8, new_data: []const u8, output: []u8, start
     }
 }
 
-fn createRLEDelta(old_data: []const u8, new_data: []const u8, writer: *std.ArrayList(u8), options: Options, allocator: std.mem.Allocator) !OpCodeCounts {
-    var counts = OpCodeCounts{};
+
+
+
+
+fn encodeXorWithMotifsEstimate(xor_data: []const u8, options: DeltaZor.Options, counts: *DeltaZor.OpCodeCounts) usize {
+    var pos: usize = 0;
+    var estimated_size: usize = 0;
+    while (pos < xor_data.len) {
+        if (options.enable_motif_detection) {
+            if (findMotifCandidate(xor_data, pos, options)) |candidate| {
+                const c = candidate;
+                const is_uniform = c.is_uniform;
+                const is_full = c.is_full;
+                const msk = c.mask;
+                const unit = c.unit_size;
+                const reps = c.repeat_length;
+                const changed = if (is_full) unit else popCount32(msk);
+                const data_len = changed * (if (is_uniform) 1 else reps);
+                estimated_size += 1; // opcode
+                estimated_size += 1; // flags
+                estimated_size += get7BitEncodedSize(reps);
+                estimated_size += get7BitEncodedSize(unit);
+                if (!is_full) {
+                    estimated_size += get7BitEncodedSize(@as(usize, @intCast(msk)));
+                }
+                estimated_size += data_len;
+                // update counts (same as write version)
+                const density = if (is_full) 1.0 else @as(f32, @floatFromInt(changed)) / @as(f32, @floatFromInt(unit));
+                const total_motif = counts.uniform_motif_count + counts.varying_motif_count + 1;
+                const new_avg = if (total_motif > 0) (counts.average_mask_density * @as(f32, @floatFromInt(total_motif - 1)) + density) / @as(f32, @floatFromInt(total_motif)) else 0.0;
+                if (is_uniform) {
+                    counts.uniform_motif_count += 1;
+                } else {
+                    counts.varying_motif_count += 1;
+                }
+                counts.average_mask_density = new_avg;
+                pos += c.covered_length;
+                continue;
+            }
+        }
+        // fallback basic RLE
+        const is_zero = xor_data[pos] == 0;
+        var run_len: usize = 1;
+        while (pos + run_len < xor_data.len and (xor_data[pos + run_len] == 0) == is_zero) run_len += 1;
+        estimated_size += 1; // opcode
+        estimated_size += get7BitEncodedSize(run_len);
+        if (!is_zero) {
+            estimated_size += run_len;
+        }
+        if (is_zero) {
+            counts.zero_run_count += 1;
+        } else {
+            counts.non_zero_run_count += 1;
+        }
+        pos += run_len;
+    }
+    return estimated_size;
+}
+
+fn createRLEDeltaEstimate(old_data: []const u8, new_data: []const u8, options: DeltaZor.Options, counts: *DeltaZor.OpCodeCounts) usize {
     const min_len = @min(old_data.len, new_data.len);
     var temp_buffer: [4096]u8 = undefined;
+    var estimated_size: usize = 0;
 
     const use_full_xor = min_len <= options.max_stack_buffer_size and options.enable_motif_detection;
     if (use_full_xor) {
         const xor_buffer = temp_buffer[0..min_len];
         writeXORDelta(old_data, new_data, xor_buffer, 0, min_len, options);
-        try encodeXorWithMotifs(xor_buffer, writer, options, &counts, allocator);
+        estimated_size += encodeXorWithMotifsEstimate(xor_buffer, options, counts);
     } else {
-        // Streaming basic RLE
+        // Streaming basic RLE estimate
         var pos: usize = 0;
         while (pos < min_len) {
             const run_start = pos;
             const is_zero = old_data[pos] == new_data[pos];
             while (pos < min_len and (old_data[pos] == new_data[pos]) == is_zero) pos += 1;
             const run_len = pos - run_start;
-            const opcode = if (is_zero) RLE_ZERO_RUN else RLE_NON_ZERO_RUN;
-            try writer.append(allocator, opcode);
-            try write7BitEncodedInt(writer, allocator, run_len);
-            if (!is_zero) {
-                const xor_temp = temp_buffer[0..run_len];
-                writeXORDelta(old_data, new_data, xor_temp, run_start, run_len, options);
-                try writer.appendSlice(allocator, xor_temp);
-            }
+            estimated_size += 1; // opcode
+            estimated_size += get7BitEncodedSize(run_len);
+            if (!is_zero) estimated_size += run_len;
             if (is_zero) counts.zero_run_count += 1 else counts.non_zero_run_count += 1;
         }
     }
 
     // Extension or truncation
     if (new_data.len > old_data.len) {
-        const extension = new_data[old_data.len..];
-        try writer.append(allocator,RLE_EXTENSION);
-        try write7BitEncodedInt(writer, allocator, extension.len);
-        try writer.appendSlice(allocator, extension);
+        const extension_len = new_data.len - old_data.len;
+        estimated_size += 1; // opcode
+        estimated_size += get7BitEncodedSize(extension_len);
+        estimated_size += extension_len;
         counts.extension_count += 1;
     } else if (new_data.len < old_data.len) {
-        try writer.append(allocator,RLE_TRUNCATION);
-        try write7BitEncodedInt(writer, allocator, new_data.len);
+        estimated_size += 1; // opcode
+        estimated_size += get7BitEncodedSize(new_data.len);
         counts.truncation_count += 1;
     }
 
-    return counts;
+    return estimated_size;
 }
 
-fn encodeXorWithMotifs(xor_data: []const u8, writer: *std.ArrayList(u8), options: Options, counts: *OpCodeCounts, allocator: std.mem.Allocator) !void {
+fn enhancedEstimateRLEWithMotifs(old_data: []const u8, new_data: []const u8, options: DeltaZor.Options) usize {
+    var counts = DeltaZor.OpCodeCounts{};
+    return createRLEDeltaEstimate(old_data, new_data, options, &counts);
+}
+
+fn write7BitEncodedIntDirect(buffer: []u8, pos: *usize, value: usize) void {
+    var v = value;
+    while (v >= 128) {
+        buffer[pos.*] = @as(u8, @intCast((v & 0x7F) | 0x80));
+        pos.* += 1;
+        v >>= 7;
+    }
+    buffer[pos.*] = @as(u8, @intCast(v));
+    pos.* += 1;
+}
+
+fn encodeXorWithMotifsDirect(xor_data: []const u8, buffer: []u8, data_pos: *usize, options: DeltaZor.Options, counts: *DeltaZor.OpCodeCounts) void {
     var pos: usize = 0;
     var temp_buffer: [4096]u8 = undefined;
     var pos_list: [32]usize = undefined;
@@ -209,15 +274,18 @@ fn encodeXorWithMotifs(xor_data: []const u8, writer: *std.ArrayList(u8), options
                 const reps = c.repeat_length;
                 const changed = if (is_full) unit else popCount32(msk);
                 const opcode = if (is_uniform) RLE_UNIFORM_MOTIF_REPEAT else RLE_VARYING_MOTIF_REPEAT;
-                try writer.append(allocator, opcode);
+                buffer[data_pos.*] = opcode;
+                data_pos.* += 1;
                 const flags = if (is_full) @as(u8, 0x00) else @as(u8, 0x80);
-                try writer.append(allocator, flags);
-                try write7BitEncodedInt(writer, allocator, reps);
-                try write7BitEncodedInt(writer, allocator, unit);
+                buffer[data_pos.*] = flags;
+                data_pos.* += 1;
+                write7BitEncodedIntDirect(buffer, data_pos, reps);
+                write7BitEncodedIntDirect(buffer, data_pos, unit);
                 if (!is_full) {
-                    try write7BitEncodedInt(writer, allocator, @as(usize, @intCast(msk)));
+                    write7BitEncodedIntDirect(buffer, data_pos, @as(usize, @intCast(msk)));
                 }
                 const data_len = changed * (if (is_uniform) 1 else reps);
+                if (data_len > temp_buffer.len) @panic("temp buffer too small for motif data");
                 if (is_full) {
                     @memcpy(temp_buffer[0..data_len], xor_data[pos..pos + data_len]);
                 } else {
@@ -241,7 +309,8 @@ fn encodeXorWithMotifs(xor_data: []const u8, writer: *std.ArrayList(u8), options
                         }
                     }
                 }
-                try writer.appendSlice(allocator, temp_buffer[0..data_len]);
+                @memcpy(buffer[data_pos.*..data_pos.* + data_len], temp_buffer[0..data_len]);
+                data_pos.* += data_len;
                 // update counts
                 const density = if (is_full) 1.0 else @as(f32, @floatFromInt(changed)) / @as(f32, @floatFromInt(unit));
                 const total_motif = counts.uniform_motif_count + counts.varying_motif_count + 1;
@@ -261,11 +330,14 @@ fn encodeXorWithMotifs(xor_data: []const u8, writer: *std.ArrayList(u8), options
         var run_len: usize = 1;
         while (pos + run_len < xor_data.len and (xor_data[pos + run_len] == 0) == is_zero) run_len += 1;
         const opcode = if (is_zero) RLE_ZERO_RUN else RLE_NON_ZERO_RUN;
-        try writer.append(allocator, opcode);
-        try write7BitEncodedInt(writer, allocator, run_len);
+        buffer[data_pos.*] = opcode;
+        data_pos.* += 1;
+        write7BitEncodedIntDirect(buffer, data_pos, run_len);
         if (!is_zero) {
+            if (run_len > temp_buffer.len) @panic("temp buffer too small for run data");
             @memcpy(temp_buffer[0..run_len], xor_data[pos..pos + run_len]);
-            try writer.appendSlice(allocator, temp_buffer[0..run_len]);
+            @memcpy(buffer[data_pos.*..data_pos.* + run_len], temp_buffer[0..run_len]);
+            data_pos.* += run_len;
         }
         if (is_zero) {
             counts.zero_run_count += 1;
@@ -276,62 +348,127 @@ fn encodeXorWithMotifs(xor_data: []const u8, writer: *std.ArrayList(u8), options
     }
 }
 
+fn createRLEDeltaDirect(old_data: []const u8, new_data: []const u8, buffer: []u8, data_pos: *usize, options: DeltaZor.Options, counts: *DeltaZor.OpCodeCounts) void {
+    const min_len = @min(old_data.len, new_data.len);
+    var temp_buffer: [4096]u8 = undefined;
+
+    const use_full_xor = min_len <= options.max_stack_buffer_size and options.enable_motif_detection;
+    if (use_full_xor) {
+        const xor_buffer = temp_buffer[0..min_len];
+        writeXORDelta(old_data, new_data, xor_buffer, 0, min_len, options);
+        encodeXorWithMotifsDirect(xor_buffer, buffer, data_pos, options, counts);
+    } else {
+        // Streaming basic RLE
+        var pos: usize = 0;
+        while (pos < min_len) {
+            const run_start = pos;
+            const is_zero = old_data[pos] == new_data[pos];
+            while (pos < min_len and (old_data[pos] == new_data[pos]) == is_zero) pos += 1;
+            const run_len = pos - run_start;
+            const opcode = if (is_zero) RLE_ZERO_RUN else RLE_NON_ZERO_RUN;
+            buffer[data_pos.*] = opcode;
+            data_pos.* += 1;
+            write7BitEncodedIntDirect(buffer, data_pos, run_len);
+            if (!is_zero) {
+                if (run_len > temp_buffer.len) @panic("temp buffer too small for run data");
+                writeXORDelta(old_data, new_data, temp_buffer[0..run_len], run_start, run_len, options);
+                @memcpy(buffer[data_pos.*..data_pos.* + run_len], temp_buffer[0..run_len]);
+                data_pos.* += run_len;
+            }
+            if (is_zero) counts.zero_run_count += 1 else counts.non_zero_run_count += 1;
+        }
+    }
+
+    // Extension or truncation
+    if (new_data.len > old_data.len) {
+        const extension = new_data[old_data.len..];
+        const extension_len = extension.len;
+        buffer[data_pos.*] = RLE_EXTENSION;
+        data_pos.* += 1;
+        write7BitEncodedIntDirect(buffer, data_pos, extension_len);
+        @memcpy(buffer[data_pos.*..data_pos.* + extension_len], extension);
+        data_pos.* += extension_len;
+        counts.extension_count += 1;
+    } else if (new_data.len < old_data.len) {
+        buffer[data_pos.*] = RLE_TRUNCATION;
+        data_pos.* += 1;
+        write7BitEncodedIntDirect(buffer, data_pos, new_data.len);
+        counts.truncation_count += 1;
+    }
+}
+
 pub fn createDeltaWithStats(old_data: []const u8, new_data: []const u8, allocator: std.mem.Allocator, options: Options, stats: *Stats) ![]u8 {
     const density = calculateChangeDensity(old_data, new_data);
     const length_diff = @abs(@as(isize, @intCast(old_data.len)) - @as(isize, @intCast(new_data.len)));
     const obvious_full = density > 0.95 and length_diff < @max(1, new_data.len / 10) and !options.enable_motif_detection;
-    var used_rle = !obvious_full;
+    const used_rle = !obvious_full;
 
-    var writer = try std.ArrayList(u8).initCapacity(allocator, 0);
-    defer writer.deinit(allocator);
+    // Conservative initial allocation for RLE attempt (large enough for worst-case RLE expansion)
+    const len_diff = if (old_data.len > new_data.len) old_data.len - new_data.len else 0;
+    const estimated_capacity = new_data.len * 2 + len_diff + 4096; // safe upper bound for RLE
+    const initial_total_size = 9 + estimated_capacity;
+    var buffer = try allocator.alloc(u8, initial_total_size);
+    var pos: usize = 0;
+
+    // Write header (common)
+    const len32 = @as(u32, @intCast(new_data.len));
+    buffer[pos] = @truncate(len32); pos += 1;
+    buffer[pos] = @truncate(len32 >> 8); pos += 1;
+    buffer[pos] = @truncate(len32 >> 16); pos += 1;
+    buffer[pos] = @truncate(len32 >> 24); pos += 1;
+    const header_end = pos;
+    buffer[pos] = if (used_rle) @as(u8, 0x00) else @as(u8, 0x01); pos += 1;
+    const data_start = pos;
 
     var pattern_counts = OpCodeCounts{};
     if (used_rle) {
-        pattern_counts = try createRLEDelta(old_data, new_data, &writer, options, allocator);
+        createRLEDeltaDirect(old_data, new_data, buffer, &pos, options, &pattern_counts);
     } else {
-        try writer.appendSlice(allocator, new_data);
+        @memcpy(buffer[pos..pos + new_data.len], new_data);
+        pos += new_data.len;
     }
 
-    const data_span = writer.items;
-    if (used_rle and data_span.len > new_data.len * 3 / 2) {
-        writer.clearAndFree(allocator);
-        try writer.appendSlice(allocator, new_data);
-        used_rle = false;
+    const rle_data_len = pos - data_start;
+    var final_used_rle = used_rle;
+    var final_data_len = rle_data_len;
+    if (used_rle and rle_data_len > new_data.len * 3 / 2) {
+        // Fallback to full replace
+        final_used_rle = false;
+        final_data_len = new_data.len;
+        // Realloc to exact size for full
+        const full_total_size = 9 + new_data.len;
+        buffer = try allocator.realloc(buffer, full_total_size);
+        pos = header_end;
+        buffer[pos] = 0x01; pos += 1; // type full
+        @memcpy(buffer[pos..pos + new_data.len], new_data);
+        pos += new_data.len;
         pattern_counts = OpCodeCounts{};
     }
 
-    const checksum = if (options.enable_checksum) crc32(data_span) else 0;
-    const total_size = 4 + 1 + data_span.len + 4;
-    const buffer = try allocator.alloc(u8, total_size);
-    var pos: usize = 0;
+    const final_data_start = if (final_used_rle) data_start else header_end + 1;
+    const checksum = if (options.enable_checksum) crc32(buffer[final_data_start..final_data_start + final_data_len]) else 0;
 
-    // Write little-endian u32 new_data.len
-    const len32 = @as(u32, @intCast(new_data.len));
-    buffer[pos] = @truncate(len32);
-    buffer[pos+1] = @truncate(len32 >> 8);
-    buffer[pos+2] = @truncate(len32 >> 16);
-    buffer[pos+3] = @truncate(len32 >> 24);
-    pos += 4;
-    buffer[pos] = if (used_rle) @as(u8, 0x00) else @as(u8, 0x01);
-    pos += 1;
-    @memcpy(buffer[pos..pos + data_span.len], data_span);
-    pos += data_span.len;
-
-    // Write checksum little-endian
+    // Write checksum
     const chk32 = checksum;
-    buffer[pos] = @truncate(chk32);
-    buffer[pos+1] = @truncate(chk32 >> 8);
-    buffer[pos+2] = @truncate(chk32 >> 16);
-    buffer[pos+3] = @truncate(chk32 >> 24);
+    buffer[pos] = @truncate(chk32); pos += 1;
+    buffer[pos] = @truncate(chk32 >> 8); pos += 1;
+    buffer[pos] = @truncate(chk32 >> 16); pos += 1;
+    buffer[pos] = @truncate(chk32 >> 24); pos += 1;
+
+    const actual_size = pos;
+
+    if (actual_size < initial_total_size) {
+        buffer = try allocator.realloc(buffer, actual_size);
+    }
 
     stats.* = .{
         .old_size = old_data.len,
         .new_size = new_data.len,
-        .delta_size = total_size,
-        .compression_ratio = if (new_data.len > 0) @as(f64, @floatFromInt(total_size)) / @as(f64, @floatFromInt(new_data.len)) else 0.0,
+        .delta_size = actual_size,
+        .compression_ratio = if (new_data.len > 0) @as(f64, @floatFromInt(actual_size)) / @as(f64, @floatFromInt(new_data.len)) else 0.0,
         .change_density = density,
-        .compression_type = if (used_rle) "RLE" else "FullReplace",
-        .used_rle = used_rle,
+        .compression_type = if (final_used_rle) "RLE" else "FullReplace",
+        .used_rle = final_used_rle,
         .op_code_counts = pattern_counts,
     };
     return buffer;

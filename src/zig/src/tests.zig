@@ -40,6 +40,8 @@ fn computeSha256Hex(data: []const u8, allocator: mem.Allocator) ![]u8 {
     return allocator.dupe(u8, hex);
 }
 
+
+
 test "apply" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -60,6 +62,8 @@ test "apply" {
 
     for (manifest.tests) |entry| {
         if (!entry.isValid) continue;
+
+        std.debug.print("Running apply test {d} ({s}): base size {d}, next size {d}, delta size {d}\n", .{ entry.testId, entry.name, entry.baseSize, entry.nextSize, entry.deltaSize });
 
         const base_path_str = try std.fmt.allocPrint(allocator, "testdata/{s}", .{entry.baseFile});
         defer allocator.free(base_path_str);
@@ -100,6 +104,7 @@ test "apply" {
         try deltazor.DeltaZor.applyDelta(base_bytes, expected_delta, output, allocator);
 
         try testing.expectEqualSlices(u8, output, next_bytes);
+        std.debug.print("Apply test {d} ({s}) passed\n", .{ entry.testId, entry.name });
     }
 }
 
@@ -123,6 +128,8 @@ test "create delta" {
 
     for (manifest.tests) |entry| {
         if (!entry.isValid) continue;
+
+        std.debug.print("Running create delta test {d} ({s}): base size {d}, next size {d}, expected delta size {d}\n", .{ entry.testId, entry.name, entry.baseSize, entry.nextSize, entry.deltaSize });
 
         const base_path_str = try std.fmt.allocPrint(allocator, "testdata/{s}", .{entry.baseFile});
         defer allocator.free(base_path_str);
@@ -162,6 +169,7 @@ test "create delta" {
 
         try testing.expectEqual(entry.deltaSize, computed_delta.len);
         try testing.expectEqualSlices(u8, expected_delta, computed_delta);
+        std.debug.print("Create delta test {d} ({s}) passed\n", .{ entry.testId, entry.name });
     }
 }
 
@@ -185,6 +193,8 @@ test "round trip" {
 
     for (manifest.tests) |entry| {
         if (!entry.isValid) continue;
+
+        std.debug.print("Running round trip test {d} ({s}): base size {d}, next size {d}, delta size {d}\n", .{ entry.testId, entry.name, entry.baseSize, entry.nextSize, entry.deltaSize });
 
         const base_path_str = try std.fmt.allocPrint(allocator, "testdata/{s}", .{entry.baseFile});
         defer allocator.free(base_path_str);
@@ -217,5 +227,51 @@ test "round trip" {
         try deltazor.DeltaZor.applyDelta(base_bytes, computed_delta, output, allocator);
 
         try testing.expectEqualSlices(u8, output, next_bytes);
+        std.debug.print("Round trip test {d} ({s}) passed\n", .{ entry.testId, entry.name });
+    }
+}
+
+test "allocation free all" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{ .safety = true }){};
+    defer if (gpa.deinit() == .leak) std.debug.panic("leak detected", .{});
+    const allocator = gpa.allocator();
+
+    const manifest_path = "testdata/manifest.json";
+    const manifest_file = try fs.cwd().openFile(manifest_path, .{ .mode = .read_only });
+    defer manifest_file.close();
+
+    const json_source = try manifest_file.readToEndAlloc(allocator, 1024 * 1024);
+    defer allocator.free(json_source);
+
+    const parse_options = json.ParseOptions{ .ignore_unknown_fields = true, .allocate = .alloc_always };
+    var parsed = try json.parseFromSlice(TestDataManifest, allocator, json_source, parse_options);
+    defer parsed.deinit();
+
+    const manifest = parsed.value;
+
+    // Test all valid entries for no leaks
+    for (manifest.tests) |entry| {
+        if (!entry.isValid) continue;
+
+        std.debug.print("Checking allocation for test {d} ({s})\n", .{ entry.testId, entry.name });
+
+        const base_path_str = try std.fmt.allocPrint(allocator, "testdata/{s}", .{entry.baseFile});
+        defer allocator.free(base_path_str);
+        const base_path = try fs.cwd().openFile(base_path_str, .{ .mode = .read_only });
+        defer base_path.close();
+        const base_bytes = try base_path.readToEndAlloc(allocator, entry.baseSize);
+        defer allocator.free(base_bytes);
+
+        const next_path_str = try std.fmt.allocPrint(allocator, "testdata/{s}", .{entry.nextFile});
+        defer allocator.free(next_path_str);
+        const next_path = try fs.cwd().openFile(next_path_str, .{ .mode = .read_only });
+        defer next_path.close();
+        const next_bytes = try next_path.readToEndAlloc(allocator, entry.nextSize);
+        defer allocator.free(next_bytes);
+
+        const computed_delta = try deltazor.DeltaZor.createDelta(base_bytes, next_bytes, allocator, .{});
+        defer allocator.free(computed_delta);
+
+        std.debug.print("No leak for test {d} ({s})\n", .{ entry.testId, entry.name });
     }
 }
