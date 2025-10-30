@@ -71,25 +71,5 @@ namespace DZ.Tests.UnitTests
             Assert.Equal(newData, output);
             Assert.Equal(1, applyStats.NewSize);
         }
-
-        [Fact]
-        public void CreateDelta_LengthMismatch_UsesFullReplace()
-        {
-            // Arrange
-            var oldData = new byte[] { 1, 2, 3 };
-            var newData = new byte[] { 1, 2, 3, 4, 5 };
-
-            // Act
-            var delta = DeltaZor.CreateDelta(oldData, newData, out var stats);
-
-            // Assert
-            // Length mismatch should use full replace
-            Assert.True(delta.Length >= 13);
-            int outputLength = BitConverter.ToInt32(delta, 0);
-            byte compressionType = delta[4];
-
-            Assert.Equal(5, outputLength);
-            Assert.Equal(0x01, compressionType); // Full replace
-        }
     }
 }

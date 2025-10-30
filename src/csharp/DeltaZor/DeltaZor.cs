@@ -7,35 +7,35 @@ using System.Numerics;
 using System.Runtime.Intrinsics;
 using System;
 
-    /// <summary>
-    /// High-performance delta compression using RLE-encoded XOR operations.
-    /// Supports length changes, multiple compression strategies, and zero-allocation APIs.
-    ///
-    /// Unified Header Format:
-    /// [output_length:4][compression_type:1][data...][checksum:4]
-    ///
-    /// Compression Types:
-    /// 0x00 = RLE Delta (XOR-based with runs)
-    /// 0x01 = Full Replace (raw data)
-    ///
-    /// RLE Opcodes Data Layout:
-    /// 0x00 = Zero Run
-    ///      Format: [opcode:1][count:7bit]
-    ///      Meaning: Run of count bytes that are identical (no change)
-    ///
-    /// 0x01 = Non-Zero Run  
-    ///      Format: [opcode:1][count:7bit][xor_data:count]
-    ///      Meaning: Run of count bytes with XOR differences, followed by count bytes of XOR data
-    ///
-    /// 0x02 = Extension
-    ///      Format: [opcode:1][count:7bit][extension_data:count]
-    ///      Meaning: Append count new bytes, followed by count bytes of extension data
-    ///
-    /// 0x03 = Truncation
-    ///      Format: [opcode:1][new_length:4]
-    ///      Meaning: Set final output length to new_length
-    /// Note: All counts use 7-bit variable length encoding where the MSB indicates continuation.
-    /// </summary>
+/// <summary>
+/// High-performance delta compression using RLE-encoded XOR operations.
+/// Supports length changes, multiple compression strategies, and zero-allocation APIs.
+///
+/// Unified Header Format:
+/// [output_length:4][compression_type:1][data...][checksum:4]
+///
+/// Compression Types:
+/// 0x00 = RLE Delta (XOR-based with runs)
+/// 0x01 = Full Replace (raw data)
+///
+/// RLE Opcodes Data Layout:
+/// 0x00 = Zero Run
+///      Format: [opcode:1][count:7bit]
+///      Meaning: Run of count bytes that are identical (no change)
+///
+/// 0x01 = Non-Zero Run  
+///      Format: [opcode:1][count:7bit][xor_data:count]
+///      Meaning: Run of count bytes with XOR differences, followed by count bytes of XOR data
+///
+/// 0x02 = Extension
+///      Format: [opcode:1][count:7bit][extension_data:count]
+///      Meaning: Append count new bytes, followed by count bytes of extension data
+///
+/// 0x03 = Truncation
+///      Format: [opcode:1][new_length:4]
+///      Meaning: Set final output length to new_length
+/// Note: All counts use 7-bit variable length encoding where the MSB indicates continuation.
+/// </summary>
 public static class DeltaZor
 {
     // Constants for header format
@@ -53,25 +53,49 @@ public static class DeltaZor
     // Others: Pending features unless noted; opcodes reserved but not yet implemented.
     // All use 7-bit varint for counts where applicable.
 
-    private const byte RLE_ZeroRun = 0x00;          // Implemented: [opcode:1][count:7bit] - Copy/no-change run.
-    private const byte RLE_NonZeroRun = 0x01;       // Implemented: [opcode:1][count:7bit][xor_data:count] - XOR run.
-    private const byte RLE_Extension = 0x02;        // Implemented: [opcode:1][count:7bit][extension_data:count] - Append new bytes.
-    private const byte RLE_Truncation = 0x03;       // Implemented: [opcode:1][new_length:4] - Trim to length.
-    private const byte RLE_UniformMotifRepeat = 0x04; // Partial: Chunk-less mask-based uniform repeats; high priority for full impl.
-    private const byte RLE_VaryingMotifRepeat = 0x05; // Partial: Chunk-less mask-based varying repeats; high priority for full impl.
-    private const byte RLE_FloatRun = 0x06;         // Pending: Specialized for float32 runs; [opcode:1][count:7bit][float_xor_data:count*4].
-    private const byte RLE_HalfRun = 0x07;          // Pending: Specialized for half-float (16-bit) runs; [opcode:1][count:7bit][half_xor_data:count*2].
-    private const byte RLE_ChannelRun = 0x08;       // Pending: Channel-optimized runs; [opcode:1][count:7bit][channels:1][mask:1][changed_data:variable].
-    private const byte RLE_Arithmetic = 0x09;       // Pending: Arithmetic compression; [opcode:1][model_id:1][count:7bit][compressed_data:variable].
-    private const byte RLE_Planar = 0x0A;           // Pending: Planar (e.g., color channel) compression; [opcode:1][plane_count:1][count:7bit][plane_data:variable].
+    private const byte RLE_ZeroRun = 0x00; // Implemented: [opcode:1][count:7bit] - Copy/no-change run.
+    private const byte RLE_NonZeroRun = 0x01; // Implemented: [opcode:1][count:7bit][xor_data:count] - XOR run.
+
+    private const byte
+        RLE_Extension = 0x02; // Implemented: [opcode:1][count:7bit][extension_data:count] - Append new bytes.
+
+    private const byte RLE_Truncation = 0x03; // Implemented: [opcode:1][new_length:4] - Trim to length.
+
+    private const byte
+        RLE_UniformMotifRepeat = 0x04; // Partial: Chunk-less mask-based uniform repeats; high priority for full impl.
+
+    private const byte
+        RLE_VaryingMotifRepeat = 0x05; // Partial: Chunk-less mask-based varying repeats; high priority for full impl.
+
+    private const byte
+        RLE_FloatRun = 0x06; // Pending: Specialized for float32 runs; [opcode:1][count:7bit][float_xor_data:count*4].
+
+    private const byte
+        RLE_HalfRun =
+            0x07; // Pending: Specialized for half-float (16-bit) runs; [opcode:1][count:7bit][half_xor_data:count*2].
+
+    private const byte
+        RLE_ChannelRun =
+            0x08; // Pending: Channel-optimized runs; [opcode:1][count:7bit][channels:1][mask:1][changed_data:variable].
+
+    private const byte
+        RLE_Arithmetic =
+            0x09; // Pending: Arithmetic compression; [opcode:1][model_id:1][count:7bit][compressed_data:variable].
+
+    private const byte
+        RLE_Planar =
+            0x0A; // Pending: Planar (e.g., color channel) compression; [opcode:1][plane_count:1][count:7bit][plane_data:variable].
     // Reserve 0x0B+ for future (e.g., Clamp-Aware, Global Shift).
 
-    private const int MotifProbeCount = 7;  // UnitSizes 2-8
-    private static readonly int[] MotifUnitSizes = {4, 8, 2, 3, 5, 6, 7};
-    private static readonly uint[] MotifUnitMods = {0x1, 0x3, 0x7, 0xF, 0x1F, 0x3F, 0x7F};  // 2^n -1 for fast pos % size
-    private static readonly float MotifDensityThreshold = 0.7f;  // Prune if popcount(mask)/size >= this
-    private const float MotifSavingsThreshold = -0.5f;  // Emit if not too much overhead
-    private const int MotifMinStreak = 2;  // Min repeats for emission
+    private const int MotifProbeCount = 7; // UnitSizes 2-8
+    private static readonly int[] MotifUnitSizes = { 4, 8, 2, 3, 5, 6, 7 };
+
+    private static readonly uint[]
+        MotifUnitMods = { 0x1, 0x3, 0x7, 0xF, 0x1F, 0x3F, 0x7F }; // 2^n -1 for fast pos % size
+
+    private static readonly float MotifDensityThreshold = 0.7f; // Prune if popcount(mask)/size >= this
+    private const float MotifSavingsThreshold = -0.5f; // Emit if not too much overhead
+    private const int MotifMinStreak = 2; // Min repeats for emission
     private const int MaxMotifStreak = 50; // Cap to bound stack
 
     /// <summary>
@@ -116,7 +140,7 @@ public static class DeltaZor
         public bool UseSIMD { get; set; } = true;
 
         public bool EnableMotifDetection { get; set; } = true;
-        public int MotifMinRunThreshold { get; set; } = 0;  // Align with SimdMinThreshold
+        public int MotifMinRunThreshold { get; set; } = 0; // Align with SimdMinThreshold
     }
 
     /// <summary>
@@ -173,19 +197,21 @@ public static class DeltaZor
     /// </summary>
     public record struct PatternCounts
     {
-        public int ZeroRunCount { get; set; }        // 0x00 (Implemented)
-        public int NonZeroRunCount { get; set; }     // 0x01 (Implemented)
-        public int ExtensionCount { get; set; }      // 0x02 (Implemented)
-        public int TruncationCount { get; set; }     // 0x03 (Implemented)
-        public int UniformMotifCount { get; set; }   // 0x04 (Partial)
-        public int VaryingMotifCount { get; set; }   // 0x05 (Partial)
+        public int ZeroRunCount { get; set; } // 0x00 (Implemented)
+        public int NonZeroRunCount { get; set; } // 0x01 (Implemented)
+        public int ExtensionCount { get; set; } // 0x02 (Implemented)
+        public int TruncationCount { get; set; } // 0x03 (Implemented)
+        public int UniformMotifCount { get; set; } // 0x04 (Partial)
+        public int VaryingMotifCount { get; set; } // 0x05 (Partial)
         public float AverageMaskDensity { get; set; } // Avg popcount(mask)/unitSize for motif sparsity
-        public int TotalPatternCount => ZeroRunCount + NonZeroRunCount + ExtensionCount + TruncationCount + ChannelRunCount + UniformMotifCount + VaryingMotifCount;
+
+        public int TotalPatternCount => ZeroRunCount + NonZeroRunCount + ExtensionCount + TruncationCount +
+                                        ChannelRunCount + UniformMotifCount + VaryingMotifCount;
 
         // For future specialized pattern detection
-        public int FloatPatternCount { get; set; }   // 0x06 (Planned)
-        public int HalfPatternCount { get; set; }    // 0x07 (Planned)
-        public int ChannelRunCount { get; set; }     // 0x08 (Planned)
+        public int FloatPatternCount { get; set; } // 0x06 (Planned)
+        public int HalfPatternCount { get; set; } // 0x07 (Planned)
+        public int ChannelRunCount { get; set; } // 0x08 (Planned)
     }
 
     #region SIMD Helpers
@@ -195,7 +221,8 @@ public static class DeltaZor
         Environment.Is64BitProcess &&
         options.UseSIMD;
 
-    private static unsafe void WriteXORDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData, Span<byte> output, int start, int length, DeltaOptions options)
+    private static unsafe void WriteXORDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData, Span<byte> output,
+        int start, int length, DeltaOptions options)
     {
         // Vectorized XOR implementation with graceful fallback
         try
@@ -207,6 +234,7 @@ public static class DeltaZor
                 {
                     output[i] = (byte)(oldData[start + i] ^ newData[start + i]);
                 }
+
                 return;
             }
 
@@ -237,7 +265,8 @@ public static class DeltaZor
         }
     }
 
-    private static unsafe void ApplyXORDelta(Span<byte> output, ReadOnlySpan<byte> xorData, int pos, int length, DeltaOptions options)
+    private static unsafe void ApplyXORDelta(Span<byte> output, ReadOnlySpan<byte> xorData, int pos, int length,
+        DeltaOptions options)
     {
         try
         {
@@ -248,6 +277,7 @@ public static class DeltaZor
                 {
                     output[pos + i] ^= xorData[i];
                 }
+
                 return;
             }
 
@@ -270,13 +300,13 @@ public static class DeltaZor
             }
         }
         catch (Exception ex) when (ex is NotSupportedException || ex is PlatformNotSupportedException)
+        {
+            // Graceful fallback to scalar implementation
+            for (int i = 0; i < length; i++)
             {
-                // Graceful fallback to scalar implementation
-                for (int i = 0; i < length; i++)
-                {
-                    output[pos + i] ^= xorData[i];
-                }
+                output[pos + i] ^= xorData[i];
             }
+        }
     }
 
     private static unsafe void VectorCopy(ReadOnlySpan<byte> source, Span<byte> dest, int length, DeltaOptions options)
@@ -303,10 +333,10 @@ public static class DeltaZor
             source.Slice(vectorCount * 16, remainder).CopyTo(dest.Slice(vectorCount * 16, remainder));
         }
         catch (Exception ex) when (ex is NotSupportedException || ex is PlatformNotSupportedException)
-            {
-                // Graceful fallback to scalar implementation
-                source.CopyTo(dest);
-            }
+        {
+            // Graceful fallback to scalar implementation
+            source.CopyTo(dest);
+        }
     }
 
     #endregion
@@ -331,12 +361,13 @@ public static class DeltaZor
         return CreateDelta(oldData, newData, DefaultOptions, out stats);
     }
 
-    public static byte[] CreateDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData, DeltaOptions options, out DeltaStats stats)
+    public static byte[] CreateDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData, DeltaOptions options,
+        out DeltaStats stats)
     {
         ArgumentNullException.ThrowIfNull(options);
 
         // Conservative allocation: Assume full replace + overhead
-        int estimatedSize = HeaderSize + newData.Length + ChecksumSize;
+        int estimatedSize = HeaderSize + (int)(newData.Length * 1.2) + ChecksumSize;
         byte[] buffer = new byte[estimatedSize];
 
         if (CreateDelta(oldData, newData, buffer.AsSpan(), out int bytesWritten, options, out stats))
@@ -354,12 +385,14 @@ public static class DeltaZor
         }
     }
 
-    public static bool CreateDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData, Span<byte> output, out int bytesWritten, out DeltaStats stats)
+    public static bool CreateDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData, Span<byte> output,
+        out int bytesWritten, out DeltaStats stats)
     {
         return CreateDelta(oldData, newData, output, out bytesWritten, DefaultOptions, out stats);
     }
 
-    public static bool CreateDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData, Span<byte> output, out int bytesWritten, DeltaOptions options, out DeltaStats stats)
+    public static bool CreateDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData, Span<byte> output,
+        out int bytesWritten, DeltaOptions options, out DeltaStats stats)
     {
         stats = default;
         ArgumentNullException.ThrowIfNull(options);
@@ -367,7 +400,8 @@ public static class DeltaZor
         // Quick pre-check: Skip RLE if obviously full-replace (high density, similar lengths) and motifs disabled
         double density = CalculateChangeDensity(oldData, newData);
         int lengthDiff = Math.Abs(oldData.Length - newData.Length);
-        bool obviousFullReplace = density > 0.95 && lengthDiff < Math.Max(1, newData.Length / 10) && !options.EnableMotifDetection;
+        bool obviousFullReplace = density > 0.95 && lengthDiff < Math.Max(1, newData.Length / 10) &&
+                                  !options.EnableMotifDetection;
         bool useRLE = !obviousFullReplace;
 
         // Use ArrayBufferWriter: Attempt RLE, fallback to full if worse
@@ -392,11 +426,11 @@ public static class DeltaZor
         if (usedRLE && dataSpan.Length > newData.Length * 1.5)
         {
             // Discard RLE, write full replace
-            writer.Clear();  // Reset buffer
+            writer.Clear(); // Reset buffer
             writer.Write(newData);
             dataSpan = writer.WrittenSpan;
             usedRLE = false;
-            patternCounts = default;  // No patterns for full
+            patternCounts = default; // No patterns for full
         }
 
         uint checksum = options.EnableChecksum ? Crc32.Compute(dataSpan) : 0;
@@ -428,7 +462,7 @@ public static class DeltaZor
             OldSize = oldData.Length,
             NewSize = newData.Length,
             DeltaSize = totalSize,
-            ChangeDensity = density,  // Cached
+            ChangeDensity = density, // Cached
             CompressionType = usedRLE ? "RLE" : "FullReplace",
             UsedRLE = usedRLE,
             PatternCounts = patternCounts
@@ -437,7 +471,8 @@ public static class DeltaZor
         return true;
     }
 
-    public static DeltaResult<bool> ApplyDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> delta, Span<byte> output, out DeltaStats stats)
+    public static DeltaResult<bool> ApplyDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> delta, Span<byte> output,
+        out DeltaStats stats)
     {
         stats = default;
 
@@ -542,24 +577,25 @@ public static class DeltaZor
     }
 
 
+    private static PatternCounts CreateRLEDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData,
+        IBufferWriter<byte> writer, DeltaOptions options)
+    {
+        var patternCounts = new PatternCounts();
+        int minLength = Math.Min(oldData.Length, newData.Length);
+        Span<byte> oneByteSpan = stackalloc byte[1];
+        Span<byte> tempBuffer = stackalloc byte[options.MaxStackBufferSize];
 
-private static PatternCounts CreateRLEDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData, IBufferWriter<byte> writer, DeltaOptions options)
+        bool useFullXor = minLength <= options.MaxStackBufferSize && options.EnableMotifDetection;
+        if (useFullXor)
         {
-            var patternCounts = new PatternCounts();
-            int minLength = Math.Min(oldData.Length, newData.Length);
-            Span<byte> oneByteSpan = stackalloc byte[1];
-
-            bool useFullXor = minLength <= options.MaxStackBufferSize && options.EnableMotifDetection;
-            if (useFullXor)
-            {
-                Span<byte> xorBuffer = stackalloc byte[minLength];
-                WriteXORDelta(oldData, newData, xorBuffer, 0, minLength, options);
-                patternCounts = EncodeXorWithMotifs(xorBuffer, writer, options, patternCounts);
-            }
-            else
-            {
-                // Streaming RLE without motifs for large data
-                int pos = 0;
+            Span<byte> xorBuffer = stackalloc byte[minLength];
+            WriteXORDelta(oldData, newData, xorBuffer, 0, minLength, options);
+            patternCounts = EncodeXorWithMotifs(xorBuffer, writer, options, patternCounts);
+        }
+        else
+        {
+            // Streaming RLE without motifs for large data
+            int pos = 0;
             while (pos < minLength)
             {
                 int runStart = pos;
@@ -573,10 +609,11 @@ private static PatternCounts CreateRLEDelta(ReadOnlySpan<byte> oldData, ReadOnly
                 Write7BitEncodedInt(writer, runLen);
                 if (!isZeroRun)
                 {
-                    Span<byte> xorTemp = stackalloc byte[runLen];
+                    Span<byte> xorTemp = tempBuffer[..runLen];
                     WriteXORDelta(oldData, newData, xorTemp, runStart, runLen, options);
                     writer.Write(xorTemp);
                 }
+
                 if (isZeroRun) patternCounts.ZeroRunCount++;
                 else patternCounts.NonZeroRunCount++;
             }
@@ -617,6 +654,7 @@ private static PatternCounts CreateRLEDelta(ReadOnlySpan<byte> oldData, ReadOnly
             if (!isZero) size += runLen;
             i += runLen;
         }
+
         return size;
     }
 
@@ -630,6 +668,7 @@ private static PatternCounts CreateRLEDelta(ReadOnlySpan<byte> oldData, ReadOnly
             if ((msk & (1u << i)) != 0)
                 first[idx++] = xorData[start + i];
         }
+
         for (int r = 1; r < reps; r++)
         {
             idx = 0;
@@ -643,17 +682,19 @@ private static PatternCounts CreateRLEDelta(ReadOnlySpan<byte> oldData, ReadOnly
                 }
             }
         }
+
         return true;
     }
 
-private static MotifCandidate? FindMotifCandidate(ReadOnlySpan<byte> xorData, int startPos, DeltaOptions options)
+    private static MotifCandidate? FindMotifCandidate(ReadOnlySpan<byte> xorData, int startPos, DeltaOptions options)
+    {
+        int len = xorData.Length - startPos;
+        Span<byte> firstUnitBuffer = stackalloc byte[8];
+        for (int u = 0; u < MotifProbeCount; u++)
         {
-            int len = xorData.Length - startPos;
-            for (int u = 0; u < MotifProbeCount; u++)
-            {
-                int unitSize = MotifUnitSizes[u];
-                int maxPossibleRepeat = len / unitSize;
-                if (maxPossibleRepeat < MotifMinStreak) continue;
+            int unitSize = MotifUnitSizes[u];
+            int maxPossibleRepeat = len / unitSize;
+            if (maxPossibleRepeat < MotifMinStreak) continue;
 
             // Compute mask from first unit
             uint mask = 0;
@@ -666,6 +707,7 @@ private static MotifCandidate? FindMotifCandidate(ReadOnlySpan<byte> xorData, in
                     pop++;
                 }
             }
+
             if (pop == 0) continue;
 
             bool isFull = (pop == unitSize);
@@ -678,18 +720,19 @@ private static MotifCandidate? FindMotifCandidate(ReadOnlySpan<byte> xorData, in
             if (isFull)
             {
                 // Full mode: check for uniform repeats
-                Span<byte> firstUnit = stackalloc byte[unitSize];
-                xorData.Slice(startPos, unitSize).CopyTo(firstUnit);
+
+                xorData.Slice(startPos, unitSize).CopyTo(firstUnitBuffer[..unitSize]);
                 // // if (density >= MotifDensityThreshold) continue; // Allow emission for full mode high density repeats
-repeatLen = 1;
+                repeatLen = 1;
                 for (int r = 1; r < maxPossibleRepeat; r++)
                 {
-                    if (!xorData.Slice(startPos + r * unitSize, unitSize).SequenceEqual(firstUnit))
+                    if (!xorData.Slice(startPos + r * unitSize, unitSize).SequenceEqual(firstUnitBuffer[..unitSize]))
                         break;
                     repeatLen++;
                 }
+
                 repeatLen = Math.Min(repeatLen, MaxMotifStreak);
-    isUniform = true;
+                isUniform = true;
             }
             else
             {
@@ -703,22 +746,32 @@ repeatLen = 1;
                         byte val = xorData[startPos + r * unitSize + i];
                         if ((mask & (1u << i)) != 0)
                         {
-                            if (val == 0) { matches = false; break; }
+                            if (val == 0)
+                            {
+                                matches = false;
+                                break;
+                            }
                         }
                         else
                         {
-                            if (val != 0) { matches = false; break; }
+                            if (val != 0)
+                            {
+                                matches = false;
+                                break;
+                            }
                         }
                     }
+
                     if (!matches) break;
                     repeatLen++;
                 }
+
                 repeatLen = Math.Min(repeatLen, MaxMotifStreak);
-    isUniform = CheckUniform(xorData, startPos, unitSize, mask, repeatLen);
+                isUniform = CheckUniform(xorData, startPos, unitSize, mask, repeatLen);
             }
 
-        if (repeatLen > MaxMotifStreak) continue;
-        if (repeatLen < MotifMinStreak) continue;
+            if (repeatLen > MaxMotifStreak) continue;
+            if (repeatLen < MotifMinStreak) continue;
 
             int covered = repeatLen * unitSize;
             int headerSize = 1 + 1 + Get7BitEncodedSize(repeatLen) + Get7BitEncodedSize(unitSize);
@@ -728,24 +781,28 @@ repeatLen = 1;
 
             int rleSize = EstimateRLESizeForSpan(xorData.Slice(startPos, covered));
             float savings = (rleSize - motifSize) / (float)rleSize;
-            
+
             if (savings > MotifSavingsThreshold)
             {
                 return new MotifCandidate(unitSize, repeatLen, covered, isFull ? 0u : mask, isUniform, isFull);
             }
         }
+
         return null;
     }
 
-private static PatternCounts EncodeXorWithMotifs(ReadOnlySpan<byte> xorData, IBufferWriter<byte> writer, DeltaOptions options, PatternCounts counts)
+    private static PatternCounts EncodeXorWithMotifs(ReadOnlySpan<byte> xorData, IBufferWriter<byte> writer,
+        DeltaOptions options, PatternCounts counts)
+    {
+        int pos = 0;
+        Span<byte> oneByteSpan = stackalloc byte[1];
+        Span<byte> tempBuffer = stackalloc byte[options.MaxStackBufferSize];
+        Span<int> posListBuffer = stackalloc int[32];
+        while (pos < xorData.Length)
         {
-            int pos = 0;
-            Span<byte> oneByteSpan = stackalloc byte[1];
-            while (pos < xorData.Length)
+            var candidate = FindMotifCandidate(xorData, pos, options);
+            if (candidate.HasValue)
             {
-                var candidate = FindMotifCandidate(xorData, pos, options);
-                if (candidate.HasValue)
-                {
                 var c = candidate.Value;
                 bool isUniform = c.isUniform;
                 bool isFull = c.isFull;
@@ -764,39 +821,42 @@ private static PatternCounts EncodeXorWithMotifs(ReadOnlySpan<byte> xorData, IBu
                 if (!isFull)
                     Write7BitEncodedInt(writer, (int)mask);
 
-            int dataLen = changedCount * (isUniform ? 1 : repeatLength);
-            Span<byte> packed = stackalloc byte[dataLen];
-            if (isFull)
-            {
-                xorData.Slice(pos, dataLen).CopyTo(packed);
-            }
-            else
-            {
-                Span<int> posList = stackalloc int[changedCount];
-                int pp = 0;
-                for (int ii = 0; ii < unitSize; ii++)
-                    if ((mask & (1u << ii)) != 0) posList[pp++] = ii;
-                int cursor = 0;
-                int maxRr = isUniform ? 1 : repeatLength;
-                for (int rr = 0; rr < maxRr; rr++)
+                int dataLen = changedCount * (isUniform ? 1 : repeatLength);
+                Span<byte> packed = tempBuffer[..dataLen];
+                if (isFull)
+                {
+                    xorData.Slice(pos, dataLen).CopyTo(packed);
+                }
+                else
+                {
+                    Span<int> posList = posListBuffer[..changedCount];
+                    int pp = 0;
+                    for (int ii = 0; ii < unitSize; ii++)
+                        if ((mask & (1u << ii)) != 0)
+                            posList[pp++] = ii;
+                    int cursor = 0;
+                    int maxRr = isUniform ? 1 : repeatLength;
+                    for (int rr = 0; rr < maxRr; rr++)
                     for (int jj = 0; jj < changedCount; jj++)
                         packed[cursor++] = xorData[pos + rr * unitSize + posList[jj]];
-            }
+                }
+
                 writer.Write(packed);
 
-            float density = isFull ? 1.0f : (changedCount / (float)unitSize);
-            int totalMotif = counts.UniformMotifCount + counts.VaryingMotifCount + 1;
-            float newAvg = (counts.AverageMaskDensity * (totalMotif - 1) + density) / totalMotif;
-            if (isUniform)
-            {
-                counts.UniformMotifCount++;
-                counts.AverageMaskDensity = newAvg;
-            }
-            else
-            {
-                counts.VaryingMotifCount++;
-                counts.AverageMaskDensity = newAvg;
-            }
+                float density = isFull ? 1.0f : (changedCount / (float)unitSize);
+                int totalMotif = counts.UniformMotifCount + counts.VaryingMotifCount + 1;
+                float newAvg = (counts.AverageMaskDensity * (totalMotif - 1) + density) / totalMotif;
+                if (isUniform)
+                {
+                    counts.UniformMotifCount++;
+                    counts.AverageMaskDensity = newAvg;
+                }
+                else
+                {
+                    counts.VaryingMotifCount++;
+                    counts.AverageMaskDensity = newAvg;
+                }
+
                 pos += c.coveredLength;
                 continue;
             }
@@ -811,18 +871,21 @@ private static PatternCounts EncodeXorWithMotifs(ReadOnlySpan<byte> xorData, IBu
             Write7BitEncodedInt(writer, runLen);
             if (!isZero)
             {
-                Span<byte> xorTemp = stackalloc byte[runLen];
+                Span<byte> xorTemp = tempBuffer[..runLen];
                 xorData.Slice(pos, runLen).CopyTo(xorTemp);
                 writer.Write(xorTemp);
             }
+
             if (isZero) counts.ZeroRunCount++;
             else counts.NonZeroRunCount++;
             pos += runLen;
         }
+
         return counts;
     }
 
-    private static bool ApplyRLEDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> delta, Span<byte> output, DeltaOptions options)
+    private static bool ApplyRLEDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> delta, Span<byte> output,
+        DeltaOptions options)
     {
         // Copy base data
         int copyLength = Math.Min(oldData.Length, output.Length);
@@ -835,6 +898,8 @@ private static PatternCounts EncodeXorWithMotifs(ReadOnlySpan<byte> xorData, IBu
         // Apply RLE operations
         var reader = new SpanReader(delta);
         int pos = 0; // Start at beginning of overlapping region
+
+        Span<int> posListBuffer = stackalloc int[32];
 
         while (reader.Remaining > 0)
         {
@@ -877,84 +942,87 @@ private static PatternCounts EncodeXorWithMotifs(ReadOnlySpan<byte> xorData, IBu
                     break;
 
                 case RLE_UniformMotifRepeat:
+                {
+                    if (!reader.TryReadByte(out byte flags)) return false;
+                    if (!reader.TryRead7BitEncodedInt(out int repeatLength)) return false;
+                    if (repeatLength < MotifMinStreak) return false;
+                    if (!reader.TryRead7BitEncodedInt(out int unitSize)) return false;
+                    if (unitSize < 1 || unitSize > 32) return false;
+
+                    bool isMasked = (flags & 0x80) != 0;
+                    uint mask = 0;
+                    int changedCount;
+                    if (isMasked)
                     {
-                        if (!reader.TryReadByte(out byte flags)) return false;
-                        if (!reader.TryRead7BitEncodedInt(out int repeatLength)) return false;
-                        if (repeatLength < MotifMinStreak) return false;
-                        if (!reader.TryRead7BitEncodedInt(out int unitSize)) return false;
-                        if (unitSize < 1 || unitSize > 32) return false;
-
-                        bool isMasked = (flags & 0x80) != 0;
-                        uint mask = 0;
-                        int changedCount;
-                        if (isMasked)
-                        {
-                            if (!reader.TryRead7BitEncodedInt(out int maskInt)) return false;
-                            mask = (uint)maskInt;
-                            changedCount = BitOperations.PopCount(mask);
-                        }
-                        else
-                        {
-                            changedCount = unitSize;
-                            mask = (1u << unitSize) - 1u;
-                        }
-
-                        ReadOnlySpan<byte> uniformXorData = reader.Read(changedCount);
-                        if (pos + unitSize * repeatLength > output.Length) return false;
-
-                        Span<int> posList = stackalloc int[changedCount];
-                        int c = 0;
-                        for (int i = 0; i < unitSize; i++)
-                            if ((mask & (1u << i)) != 0 || !isMasked) posList[c++] = i;
-
-                        for (int r = 0; r < repeatLength; r++)
-                            for (int j = 0; j < changedCount; j++)
-                                output[pos + r * unitSize + posList[j]] ^= uniformXorData[j];
-                        pos += unitSize * repeatLength;
+                        if (!reader.TryRead7BitEncodedInt(out int maskInt)) return false;
+                        mask = (uint)maskInt;
+                        changedCount = BitOperations.PopCount(mask);
                     }
+                    else
+                    {
+                        changedCount = unitSize;
+                        mask = (1u << unitSize) - 1u;
+                    }
+
+                    ReadOnlySpan<byte> uniformXorData = reader.Read(changedCount);
+                    if (pos + unitSize * repeatLength > output.Length) return false;
+
+                    Span<int> posList = posListBuffer[..changedCount];
+                    int c = 0;
+                    for (int i = 0; i < unitSize; i++)
+                        if ((mask & (1u << i)) != 0 || !isMasked)
+                            posList[c++] = i;
+
+                    for (int r = 0; r < repeatLength; r++)
+                    for (int j = 0; j < changedCount; j++)
+                        output[pos + r * unitSize + posList[j]] ^= uniformXorData[j];
+                    pos += unitSize * repeatLength;
+                }
                     break;
 
                 case RLE_VaryingMotifRepeat:
+                {
+                    if (!reader.TryReadByte(out byte flags)) return false;
+                    if (!reader.TryRead7BitEncodedInt(out int repeatLength)) return false;
+                    if (repeatLength < MotifMinStreak) return false;
+                    if (!reader.TryRead7BitEncodedInt(out int unitSize)) return false;
+                    if (unitSize < 1 || unitSize > 32) return false;
+
+                    bool isMasked = (flags & 0x80) != 0;
+                    uint mask = 0;
+                    int changedCount;
+                    if (isMasked)
                     {
-                        if (!reader.TryReadByte(out byte flags)) return false;
-                        if (!reader.TryRead7BitEncodedInt(out int repeatLength)) return false;
-                        if (repeatLength < MotifMinStreak) return false;
-                        if (!reader.TryRead7BitEncodedInt(out int unitSize)) return false;
-                        if (unitSize < 1 || unitSize > 32) return false;
-
-                        bool isMasked = (flags & 0x80) != 0;
-                        uint mask = 0;
-                        int changedCount;
-                        if (isMasked)
-                        {
-                            if (!reader.TryRead7BitEncodedInt(out int maskInt)) return false;
-                            mask = (uint)maskInt;
-                            changedCount = BitOperations.PopCount(mask);
-                        }
-                        else
-                        {
-                            changedCount = unitSize;
-                            mask = (1u << unitSize) - 1u;
-                        }
-
-                        int totalXorDataSize = changedCount * repeatLength;
-                        ReadOnlySpan<byte> allXorData = reader.Read(totalXorDataSize);
-                        if (pos + unitSize * repeatLength > output.Length) return false;
-
-                        Span<int> posList = stackalloc int[changedCount];
-                        int c = 0;
-                        for (int i = 0; i < unitSize; i++)
-                            if ((mask & (1u << i)) != 0 || !isMasked) posList[c++] = i;
-
-                        int dataCursor = 0;
-                        for (int r = 0; r < repeatLength; r++)
-                        {
-                            for (int j = 0; j < changedCount; j++)
-                                output[pos + r * unitSize + posList[j]] ^= allXorData[dataCursor + j];
-                            dataCursor += changedCount;
-                        }
-                        pos += unitSize * repeatLength;
+                        if (!reader.TryRead7BitEncodedInt(out int maskInt)) return false;
+                        mask = (uint)maskInt;
+                        changedCount = BitOperations.PopCount(mask);
                     }
+                    else
+                    {
+                        changedCount = unitSize;
+                        mask = (1u << unitSize) - 1u;
+                    }
+
+                    int totalXorDataSize = changedCount * repeatLength;
+                    ReadOnlySpan<byte> allXorData = reader.Read(totalXorDataSize);
+                    if (pos + unitSize * repeatLength > output.Length) return false;
+
+                    Span<int> posList = posListBuffer[..changedCount];
+                    int c = 0;
+                    for (int i = 0; i < unitSize; i++)
+                        if ((mask & (1u << i)) != 0 || !isMasked)
+                            posList[c++] = i;
+
+                    int dataCursor = 0;
+                    for (int r = 0; r < repeatLength; r++)
+                    {
+                        for (int j = 0; j < changedCount; j++)
+                            output[pos + r * unitSize + posList[j]] ^= allXorData[dataCursor + j];
+                        dataCursor += changedCount;
+                    }
+
+                    pos += unitSize * repeatLength;
+                }
                     break;
 
                 default:
@@ -989,10 +1057,11 @@ private static PatternCounts EncodeXorWithMotifs(ReadOnlySpan<byte> xorData, IBu
             span[pos++] = (byte)(v | 0x80);
             v >>= 7;
         }
+
         span[pos++] = (byte)v;
         return pos;
     }
-    
+
     private static void Write7BitEncodedInt(BinaryWriter writer, int value)
     {
         uint v = (uint)value;
@@ -1001,6 +1070,7 @@ private static PatternCounts EncodeXorWithMotifs(ReadOnlySpan<byte> xorData, IBu
             writer.Write((byte)(v | 0x80));
             v >>= 7;
         }
+
         writer.Write((byte)v);
     }
 
@@ -1023,6 +1093,7 @@ private static PatternCounts EncodeXorWithMotifs(ReadOnlySpan<byte> xorData, IBu
         {
             if (oldData[i] != newData[i]) changes++;
         }
+
         changes += Math.Abs(oldData.Length - newData.Length);
 
         return (double)changes / minLength;
@@ -1055,6 +1126,7 @@ private static PatternCounts EncodeXorWithMotifs(ReadOnlySpan<byte> xorData, IBu
                 value = 0;
                 return false;
             }
+
             value = _span[_position++];
             return true;
         }
@@ -1066,6 +1138,7 @@ private static PatternCounts EncodeXorWithMotifs(ReadOnlySpan<byte> xorData, IBu
                 value = 0;
                 return false;
             }
+
             value = BitConverter.ToInt32(_span[_position..]);
             _position += 4;
             return true;
@@ -1087,8 +1160,7 @@ private static PatternCounts EncodeXorWithMotifs(ReadOnlySpan<byte> xorData, IBu
 
                 if (shift > 35) // Prevent overflow
                     return false;
-            }
-            while ((b & 0x80) != 0);
+            } while ((b & 0x80) != 0);
 
             return true;
         }
@@ -1121,6 +1193,7 @@ private static PatternCounts EncodeXorWithMotifs(ReadOnlySpan<byte> xorData, IBu
                 {
                     crc = (crc & 1) != 0 ? (crc >> 1) ^ polynomial : crc >> 1;
                 }
+
                 table[i] = crc;
             }
 
@@ -1134,6 +1207,7 @@ private static PatternCounts EncodeXorWithMotifs(ReadOnlySpan<byte> xorData, IBu
             {
                 crc = Table[(crc ^ b) & 0xFF] ^ (crc >> 8);
             }
+
             return crc ^ 0xFFFFFFFF;
         }
     }

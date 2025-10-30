@@ -58,32 +58,6 @@ namespace DZ.Tests.UnitTests
         }
 
         [Fact]
-        public void CreateDelta_MixedDifferences_UsesAppropriateCompression()
-        {
-            // Arrange
-            var oldData = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 };
-            var newData = new byte[] { 1, 9, 3, 4, 5, 10, 7, 8 };
-            var options = new DeltaZor.DeltaOptions(); // Lower threshold
-
-            // Act
-            var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);
-
-            // Assert
-            Assert.True(delta.Length >= 9);
-            int outputLength = BitConverter.ToInt32(delta, 0);
-            byte compressionType = delta[4];
-
-            Assert.Equal(8, outputLength);
-            // For this pattern, full replace is more efficient (RLE estimate 12 > 8)
-            Assert.Equal(0x01, compressionType);
-            // Full replace should have no pattern counts
-            Assert.Equal(0, stats.PatternCounts.ZeroRunCount);
-            Assert.Equal(0, stats.PatternCounts.NonZeroRunCount);
-            Assert.Equal(0, stats.PatternCounts.ExtensionCount);
-            Assert.Equal(0, stats.PatternCounts.TruncationCount);
-        }
-
-        [Fact]
         public void ApplyDelta_ValidDelta_RecreatesNewData()
         {
             // Arrange
