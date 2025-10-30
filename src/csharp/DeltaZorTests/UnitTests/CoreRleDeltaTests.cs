@@ -63,7 +63,7 @@ namespace DZ.Tests.UnitTests
             // Arrange
             var oldData = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 };
             var newData = new byte[] { 1, 9, 3, 4, 5, 10, 7, 8 };
-            var options = new DeltaZor.DeltaOptions { CompressionThreshold = 0.0 }; // Lower threshold
+            var options = new DeltaZor.DeltaOptions(); // Lower threshold
 
             // Act
             var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);

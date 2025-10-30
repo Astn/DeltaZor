@@ -143,7 +143,7 @@ namespace DZ.Tests.UnitTests
             newData[800] = 51;
             newData[900] = 52;
             
-            var options = new DeltaZor.DeltaOptions { CompressionThreshold = 0.1 }; // Low threshold
+            var options = new DeltaZor.DeltaOptions { CompressionThreshold = 0.99 }; // Low threshold
 
             // Act
             var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);
