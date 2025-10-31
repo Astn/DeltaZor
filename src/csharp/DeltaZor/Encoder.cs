@@ -318,7 +318,7 @@ public static class DeltaEncoder
             {
                 // Emit motif
                 EmitMotif(accumulator, xorData, writer, tempBuffer, posListBuffer, ref counts);
-                pos += accumulator.CoveredLength;
+                pos = accumulator.StartPos + accumulator.CoveredLength;
                 accumulator.Reset();
                 continue;
             }

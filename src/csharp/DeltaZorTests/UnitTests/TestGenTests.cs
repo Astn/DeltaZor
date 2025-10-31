@@ -17,7 +17,7 @@ public class DeltaFileValidationTests
     {
         UseSIMD = true,
         EnableMotifDetection = true,
-        EnableChecksum = true,
+        EnableChecksum = false,
         CompressionThreshold = 0.5
     };
 

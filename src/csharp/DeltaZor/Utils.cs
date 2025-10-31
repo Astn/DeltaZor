@@ -246,41 +246,40 @@ public static class DeltaUtils
     {
         Span<byte> oneByteSpan = stackalloc byte[1];
         uint v = (uint)value;
-        while (v >= 0x80)
+        do
         {
-            oneByteSpan[0] = (byte)(v | 0x80);
-            writer.Write(oneByteSpan);
+            byte b = (byte)(v & 0x7F);
             v >>= 7;
-        }
-
-        oneByteSpan[0] = (byte)v;
-        writer.Write(oneByteSpan);
+            if (v != 0) b |= 0x80;
+            oneByteSpan[0] = b;
+            writer.Write(oneByteSpan);
+        } while (v != 0);
     }
 
     internal static int Write7BitEncodedInt(Span<byte> span, int value)
     {
         int pos = 0;
         uint v = (uint)value;
-        while (v >= 0x80)
+        do
         {
-            span[pos++] = (byte)(v | 0x80);
+            byte b = (byte)(v & 0x7F);
             v >>= 7;
-        }
-
-        span[pos++] = (byte)v;
+            if (v != 0) b |= 0x80;
+            span[pos++] = b;
+        } while (v != 0);
         return pos;
     }
 
     internal static void Write7BitEncodedInt(BinaryWriter writer, int value)
     {
         uint v = (uint)value;
-        while (v >= 0x80)
+        do
         {
-            writer.Write((byte)(v | 0x80));
+            byte b = (byte)(v & 0x7F);
             v >>= 7;
-        }
-
-        writer.Write((byte)v);
+            if (v != 0) b |= 0x80;
+            writer.Write(b);
+        } while (v != 0);
     }
 
     internal static int Get7BitEncodedSize(int value)

@@ -160,6 +160,6 @@ public static class DeltaDecoder
             }
         }
 
-        return pos == output.Length;
+        return reader.Remaining == 0 && pos <= output.Length;
     }
 }

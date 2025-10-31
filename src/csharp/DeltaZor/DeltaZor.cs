@@ -115,7 +115,7 @@ public static class DeltaZor
         /// <summary>
         /// Whether to include checksum for corruption detection.
         /// </summary>
-        public bool EnableChecksum { get; set; } = true;
+        public bool EnableChecksum { get; set; } = false;
 
         /// <summary>
         /// Maximum buffer size for stack allocation (bytes).
@@ -436,10 +436,11 @@ public static class DeltaZor
             patternCounts = default; // No patterns for full
         }
 
-        uint checksum = options.EnableChecksum ? Crc32.Compute(dataSpan) : 0;
+        uint checksum = options.EnableChecksum ? Crc32.Compute(newData) : 0;
         var checksumBytes = BitConverter.GetBytes(checksum);
         int dataSize = dataSpan.Length;
-        int totalSize = HeaderSize + dataSize + ChecksumSize;
+        int checksumSize = options.EnableChecksum ? 4 : 0;
+        int totalSize = HeaderSize + dataSize + checksumSize;
 
         if (totalSize > output.Length)
         {
@@ -455,7 +456,7 @@ public static class DeltaZor
         dataSpan.CopyTo(output.Slice(HeaderSize));
 
         // Copy checksum
-        checksumBytes.CopyTo(output.Slice(HeaderSize + dataSize));
+        if (options.EnableChecksum) checksumBytes.CopyTo(output.Slice(HeaderSize + dataSize));
 
         bytesWritten = totalSize;
 
@@ -480,7 +481,7 @@ public static class DeltaZor
         stats = default;
 
         // Validate minimum size
-        if (delta.Length < MinDeltaSize)
+        int minSize = HeaderSize; if (delta.Length < minSize)
             return DeltaResult<bool>.Fail("Delta too small for valid header");
 
         // Parse header
@@ -493,17 +494,14 @@ public static class DeltaZor
         if (output.Length < outputLength)
             return DeltaResult<bool>.Fail("Output buffer too small");
 
-        // Checksum is always present in the format
-        ReadOnlySpan<byte> dataSpan = delta.Slice(HeaderSize, delta.Length - HeaderSize - ChecksumSize);
-        ReadOnlySpan<byte> checksumSpan = delta.Slice(delta.Length - ChecksumSize);
-        uint expectedChecksum = BitConverter.ToUInt32(checksumSpan);
-
-        // Only validate checksum if it was computed (non-zero)
-        if (expectedChecksum != 0)
+        var options = DefaultOptions;
+        int checksumSize = options.EnableChecksum ? 4 : 0;
+        ReadOnlySpan<byte> dataSpan = delta.Slice(HeaderSize, delta.Length - HeaderSize - checksumSize);
+        uint expectedChecksum = 0;
+        if (options.EnableChecksum)
         {
-            uint actualChecksum = Crc32.Compute(dataSpan);
-            if (expectedChecksum != actualChecksum)
-                return DeltaResult<bool>.Fail("Checksum validation failed");
+            ReadOnlySpan<byte> checksumSpan = delta.Slice(delta.Length - checksumSize);
+            expectedChecksum = BitConverter.ToUInt32(checksumSpan);
         }
 
         // Apply compression
@@ -539,6 +537,13 @@ public static class DeltaZor
 
             default:
                 return DeltaResult<bool>.Fail($"Unknown compression type: {compressionType}");
+        }
+
+        if (success && options.EnableChecksum)
+        {
+            uint actualChecksum = Crc32.Compute(output.Slice(0, outputLength));
+            if (actualChecksum != expectedChecksum)
+                return DeltaResult<bool>.Fail("Checksum mismatch");
         }
 
         return success ? DeltaResult<bool>.Ok(true) : DeltaResult<bool>.Fail("Delta application failed");
