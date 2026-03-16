@@ -9,23 +9,8 @@ pub const bit_masks = blk: {
 };
 
 pub fn crc32(data: []const u8) u32 {
-    const poly: u32 = 0xEDB88320;
-    var table: [256]u32 = undefined;
-    var i: usize = 0;
-    while (i < 256) : (i += 1) {
-        var crc: u32 = @intCast(i);
-        var j: u5 = 0;
-        while (j < 8) : (j += 1) {
-            crc = if ((crc & 1) != 0) ((crc >> 1) ^ poly) else (crc >> 1);
-        }
-        table[@as(usize, i)] = crc;
-    }
-
-    var crc: u32 = 0xFFFFFFFF;
-    for (data) |b| {
-        crc = table[(crc ^ @as(u32, b)) & 0xFF] ^ (crc >> 8);
-    }
-    return crc ^ 0xFFFFFFFF;
+    // Using std.hash.XxHash32 instead of CRC32
+    return std.hash.XxHash32.hash(0, data);
 }
 
 pub fn readByte(reader_pos: *usize, data: []const u8) !u8 {

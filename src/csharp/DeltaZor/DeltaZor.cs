@@ -436,7 +436,7 @@ public static class DeltaZor
             patternCounts = default; // No patterns for full
         }
 
-        uint checksum = options.EnableChecksum ? Crc32.Compute(newData) : 0;
+        uint checksum = options.EnableChecksum ? XxHash32Wrapper.Compute(newData) : 0;
         var checksumBytes = BitConverter.GetBytes(checksum);
         int dataSize = dataSpan.Length;
         int checksumSize = options.EnableChecksum ? 4 : 0;
@@ -541,7 +541,7 @@ public static class DeltaZor
 
         if (success && options.EnableChecksum)
         {
-            uint actualChecksum = Crc32.Compute(output.Slice(0, outputLength));
+            uint actualChecksum = XxHash32Wrapper.Compute(output.Slice(0, outputLength));
             if (actualChecksum != expectedChecksum)
                 return DeltaResult<bool>.Fail("Checksum mismatch");
         }
@@ -683,43 +683,14 @@ public static class DeltaZor
 
     #region Helper Types
 
-
-
     /// <summary>
-    /// Simple CRC32 implementation for checksums.
+    /// Computes XxHash32 checksums.
     /// </summary>
-    public static class Crc32
+    public static class XxHash32Wrapper
     {
-        private static readonly uint[] Table = InitializeTable();
-
-        private static uint[] InitializeTable()
-        {
-            const uint polynomial = 0xEDB88320;
-            var table = new uint[256];
-
-            for (uint i = 0; i < 256; i++)
-            {
-                uint crc = i;
-                for (int j = 0; j < 8; j++)
-                {
-                    crc = (crc & 1) != 0 ? (crc >> 1) ^ polynomial : crc >> 1;
-                }
-
-                table[i] = crc;
-            }
-
-            return table;
-        }
-
         public static uint Compute(ReadOnlySpan<byte> data)
         {
-            uint crc = 0xFFFFFFFF;
-            foreach (byte b in data)
-            {
-                crc = Table[(crc ^ b) & 0xFF] ^ (crc >> 8);
-            }
-
-            return crc ^ 0xFFFFFFFF;
+            return XxHash32.HashToUInt32(data);
         }
     }
 
