@@ -3,14 +3,15 @@ const utils = @import("utils.zig");
 
 const readByte = utils.readByte;
 const read7bit = utils.read7bit;
-const crc32 = utils.crc32;
+const xxhash32 = utils.xxhash32;
 const popCount32 = utils.popCount32;
 const bit_masks = utils.bit_masks;
 
 pub fn applyDelta(old_data: []const u8, delta: []const u8, output: []u8, allocator: std.mem.Allocator) !void {
     _ = allocator;
 
-    if (delta.len < 9) return error.InvalidDelta;
+    // Minimum valid delta: 5 bytes (4 output_length + 1 compression_type)
+    if (delta.len < 5) return error.InvalidDelta;
 
     var header_pos: usize = 0;
     const b0 = delta[header_pos]; header_pos += 1;
@@ -20,22 +21,27 @@ pub fn applyDelta(old_data: []const u8, delta: []const u8, output: []u8, allocat
     const output_len: u32 = @as(u32, b0) | (@as(u32, b1) << 8) | (@as(u32, b2) << 16) | (@as(u32, b3) << 24);
     if (output.len < @as(usize, output_len)) return error.OutputTooSmall;
 
-    const comp_type: u8 = delta[header_pos]; header_pos += 1;
+    const comp_type_byte: u8 = delta[header_pos]; header_pos += 1;
+
+    // Self-describing checksum: bit 7 of compression_type indicates checksum present
+    const has_checksum = (comp_type_byte & 0x80) != 0;
+    const comp_type: u8 = comp_type_byte & 0x7F;
 
     const data_start: usize = header_pos;
-    const checksum_start: usize = delta.len - 4;
-    const data = delta[data_start..checksum_start];
+    const checksum_size: usize = if (has_checksum) 4 else 0;
+    if (delta.len < data_start + checksum_size) return error.InvalidDelta;
+    const data_end: usize = delta.len - checksum_size;
+    const data = delta[data_start..data_end];
 
-    var checksum_pos: usize = checksum_start;
-    const cb0 = delta[checksum_pos]; checksum_pos += 1;
-    const cb1 = delta[checksum_pos]; checksum_pos += 1;
-    const cb2 = delta[checksum_pos]; checksum_pos += 1;
-    const cb3 = delta[checksum_pos]; checksum_pos += 1;
-    const expected_crc: u32 = @as(u32, cb0) | (@as(u32, cb1) << 8) | (@as(u32, cb2) << 16) | (@as(u32, cb3) << 24);
-
-    if (expected_crc != 0) {
-        const actual_crc = crc32(data);
-        if (actual_crc != expected_crc) return error.ChecksumFailed;
+    // Read expected checksum from the last 4 bytes (before decoding)
+    var expected_crc: u32 = 0;
+    if (has_checksum) {
+        const checksum_start: usize = delta.len - 4;
+        const cb0 = delta[checksum_start];
+        const cb1 = delta[checksum_start + 1];
+        const cb2 = delta[checksum_start + 2];
+        const cb3 = delta[checksum_start + 3];
+        expected_crc = @as(u32, cb0) | (@as(u32, cb1) << 8) | (@as(u32, cb2) << 16) | (@as(u32, cb3) << 24);
     }
 
     switch (comp_type) {
@@ -197,5 +203,11 @@ pub fn applyDelta(old_data: []const u8, delta: []const u8, output: []u8, allocat
             if (pos != output.len) return error.InvalidLength;
         },
         else => return error.UnknownCompression,
+    }
+
+    // Validate checksum AFTER decoding — checksum is over the decoded output (new_data)
+    if (has_checksum) {
+        const actual_crc = xxhash32(output[0..@as(usize, output_len)]);
+        if (actual_crc != expected_crc) return error.ChecksumFailed;
     }
 }

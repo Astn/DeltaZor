@@ -22,6 +22,10 @@ public static class DeltaUtils
     internal const byte CompressionType_RLE = 0x00;
     internal const byte CompressionType_FullReplace = 0x01;
 
+    // Checksum self-description constants (bit 7 of compression_type byte)
+    internal const byte ChecksumFlag = 0x80;
+    internal const byte CompressionTypeMask = 0x7F;
+
     // Unified Opcode Table (as of October 28, 2025)
     // Core: Highest priority, fully implemented.
     // MOTIF: High priority, partial implementation—focus on completion next (allocation-free detection, SIMD patching).
@@ -114,7 +118,7 @@ public static class DeltaUtils
 
 
     // Default Options
-    public static DeltaZor.DeltaOptions DefaultOptions => new() { UseSIMD = true, CompressionThreshold = 2.0 };
+    public static DeltaZor.DeltaOptions DefaultOptions => new() { UseSIMD = true };
 
     #region SIMD Helpers
 

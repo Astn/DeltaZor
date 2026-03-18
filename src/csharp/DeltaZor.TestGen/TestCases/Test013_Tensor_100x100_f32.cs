@@ -27,7 +27,7 @@ uniform random values centered around zero (-.5 to .5) and incremented by a set 
     {
         if (!_base.IsEmpty) return _base;
         var buf = new byte[W * H * C * 4];
-        var span = MemoryMarshal.Cast<byte, float>(buf);
+        var span = MemoryMarshal.Cast<byte, float>(buf.AsSpan());
         var rng = new Random(0xDE17A20);
         for (int i = 0; i < span.Length; i++)
             span[i] = rng.NextSingle() - 0.5f;

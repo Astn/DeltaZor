@@ -1,10 +1,6 @@
 namespace DZ;
 
 using System.Buffers;
-using System.Collections.Generic;
-using System.IO;
-using System.Numerics;
-using System.Runtime.Intrinsics;
 using System;
 using static DeltaUtils;
 using static DeltaEncoder;
@@ -15,9 +11,11 @@ using static DeltaDecoder;
 /// Supports length changes, multiple compression strategies, and zero-allocation APIs.
 ///
 /// Unified Header Format:
-/// [output_length:4][compression_type:1][data...][checksum:4]
+/// [output_length:4][compression_type:1][data...][checksum:4 (optional)]
 ///
-/// Compression Types:
+/// compression_type byte: bits 0-6 = compression algorithm, bit 7 = checksum present
+///
+/// Compression Types (bits 0-6):
 /// 0x00 = RLE Delta (XOR-based with runs)
 /// 0x01 = Full Replace (raw data)
 ///
@@ -41,76 +39,18 @@ using static DeltaDecoder;
 /// </summary>
 public static class DeltaZor
 {
-    // Constants for header format
-    private const int HeaderSize = sizeof(int) + sizeof(byte); // output_length + compression_type
-    private const int ChecksumSize = sizeof(uint);
-    private const int MinDeltaSize = HeaderSize + ChecksumSize;
-
-    // Compression type constants
-    private const byte CompressionType_RLE = 0x00;
-    private const byte CompressionType_FullReplace = 0x01;
-
-    // Unified Opcode Table (as of October 28, 2025)
-    // Core: Highest priority, fully implemented.
-    // MOTIF: High priority, partial implementation—focus on completion next (allocation-free detection, SIMD patching).
-    // Others: Pending features unless noted; opcodes reserved but not yet implemented.
-    // All use 7-bit varint for counts where applicable.
-
-    private const byte RLE_ZeroRun = 0x00; // Implemented: [opcode:1][count:7bit] - Copy/no-change run.
-    private const byte RLE_NonZeroRun = 0x01; // Implemented: [opcode:1][count:7bit][xor_data:count] - XOR run.
-
-    private const byte
-        RLE_Extension = 0x02; // Implemented: [opcode:1][count:7bit][extension_data:count] - Append new bytes.
-
-    private const byte RLE_Truncation = 0x03; // Implemented: [opcode:1][new_length:4] - Trim to length.
-
-    private const byte
-        RLE_UniformMotifRepeat = 0x04; // Partial: Chunk-less mask-based uniform repeats; high priority for full impl.
-
-    private const byte
-        RLE_VaryingMotifRepeat = 0x05; // Partial: Chunk-less mask-based varying repeats; high priority for full impl.
-
-    private const byte
-        RLE_FloatRun = 0x06; // Pending: Specialized for float32 runs; [opcode:1][count:7bit][float_xor_data:count*4].
-
-    private const byte
-        RLE_HalfRun =
-            0x07; // Pending: Specialized for half-float (16-bit) runs; [opcode:1][count:7bit][half_xor_data:count*2].
-
-    private const byte
-        RLE_ChannelRun =
-            0x08; // Pending: Channel-optimized runs; [opcode:1][count:7bit][channels:1][mask:1][changed_data:variable].
-
-    private const byte
-        RLE_Arithmetic =
-            0x09; // Pending: Arithmetic compression; [opcode:1][model_id:1][count:7bit][compressed_data:variable].
-
-    private const byte
-        RLE_Planar =
-            0x0A; // Pending: Planar (e.g., color channel) compression; [opcode:1][plane_count:1][count:7bit][plane_data:variable].
-    // Reserve 0x0B+ for future (e.g., Clamp-Aware, Global Shift).
-
-    private const int MotifProbeCount = 7; // UnitSizes 2-8
-    private static readonly int[] MotifUnitSizes = { 4, 8, 2, 3, 5, 6, 7 };
-
-    private static readonly uint[]
-        MotifUnitMods = { 0x1, 0x3, 0x7, 0xF, 0x1F, 0x3F, 0x7F }; // 2^n -1 for fast pos % size
-
-    private static readonly float MotifDensityThreshold = 0.7f; // Prune if popcount(mask)/size >= this
-    private const float MotifSavingsThreshold = -0.5f; // Emit if not too much overhead
-    private const int MotifMinStreak = 2; // Min repeats for emission
-    private const int MaxMotifStreak = 50; // Cap to bound stack
-
     /// <summary>
     /// Configuration options for delta compression behavior.
     /// </summary>
     public class DeltaOptions
     {
         /// <summary>
-        /// Minimum compression ratio required to use RLE (1.0 = always use RLE, 0 = never use RLE).
-        /// Default is 0.95 (50% size reduction required).
+        /// RLE-to-FullReplace fallback threshold: if the RLE-encoded data exceeds
+        /// newData.Length × CompressionThreshold, fall back to FullReplace.
+        /// Default is 1.5 (RLE must be within 150% of raw size).
+        /// Set to 2.0+ to force RLE in tests that verify RLE/motif behavior.
         /// </summary>
-        public double CompressionThreshold { get; set; } = 0.95;
+        public double CompressionThreshold { get; set; } = 1.5;
 
         /// <summary>
         /// Whether to include checksum for corruption detection.
@@ -161,40 +101,6 @@ public static class DeltaZor
         public OpCodeCounts OpCodeCounts { get; init; }
     }
 
-    private readonly struct MotifCandidate
-    {
-        public readonly int unitSize;
-        public readonly int repeatLength;
-        public readonly int coveredLength;
-        public readonly uint mask;
-        public readonly bool isUniform;
-        public readonly bool isFull;
-
-        public MotifCandidate(int unitSize, int repeatLength, int coveredLength, uint mask, bool isUniform, bool isFull)
-        {
-            this.unitSize = unitSize;
-            this.repeatLength = repeatLength;
-            this.coveredLength = coveredLength;
-            this.mask = mask;
-            this.isUniform = isUniform;
-            this.isFull = isFull;
-        }
-    }
-
-    /// <summary>
-    /// Represents a detected channel pattern for optimization.
-    /// </summary>
-    internal readonly struct ChannelPattern
-    {
-        public int Channels { get; init; }
-        public byte ChannelMask { get; init; }
-        public int ChangedChannels { get; init; }
-        public double CompressionSavings { get; init; }
-        public bool IsBeneficial { get; init; }
-
-        public static ChannelPattern None => new() { IsBeneficial = false };
-    }
-
     /// <summary>
     /// Counts of different opcodes emitted during delta creation.
     /// </summary>
@@ -216,133 +122,6 @@ public static class DeltaZor
         public int HalfPatternCount { get; set; } // 0x07 (Planned)
         public int ChannelRunCount { get; set; } // 0x08 (Planned)
     }
-
-    #region SIMD Helpers
-
-    private static bool UseSIMD(DeltaOptions options) =>
-        Vector.IsHardwareAccelerated &&
-        Environment.Is64BitProcess &&
-        options.UseSIMD;
-
-    private static unsafe void WriteXORDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData, Span<byte> output,
-        int start, int length, DeltaOptions options)
-    {
-        // Vectorized XOR implementation with graceful fallback
-        try
-        {
-            if (length < 16 || !UseSIMD(options))
-            {
-                // Scalar fallback
-                for (int i = 0; i < length; i++)
-                {
-                    output[i] = (byte)(oldData[start + i] ^ newData[start + i]);
-                }
-
-                return;
-            }
-
-            // SIMD implementation
-            int vectorCount = length / 16;
-            int remainder = length % 16;
-            for (int i = 0; i < vectorCount; i++)
-            {
-                var oldVec = Vector128.Create(oldData.Slice(start + i * 16, 16));
-                var newVec = Vector128.Create(newData.Slice(start + i * 16, 16));
-                var xorVec = Vector128.Xor<byte>(oldVec, newVec);
-                xorVec.StoreUnsafe(ref output[i * 16]);
-            }
-
-            // Handle remainder
-            for (int i = vectorCount * 16; i < length; i++)
-            {
-                output[i] = (byte)(oldData[start + i] ^ newData[start + i]);
-            }
-        }
-        catch (Exception ex) when (ex is NotSupportedException || ex is PlatformNotSupportedException)
-        {
-            // Graceful fallback to scalar implementation
-            for (int i = 0; i < length; i++)
-            {
-                output[i] = (byte)(oldData[start + i] ^ newData[start + i]);
-            }
-        }
-    }
-
-    private static unsafe void ApplyXORDelta(Span<byte> output, ReadOnlySpan<byte> xorData, int pos, int length,
-        DeltaOptions options)
-    {
-        try
-        {
-            if (length < 16 || !UseSIMD(options))
-            {
-                // Scalar fallback
-                for (int i = 0; i < length; i++)
-                {
-                    output[pos + i] ^= xorData[i];
-                }
-
-                return;
-            }
-
-            // SIMD implementation
-            int vectorCount = length / 16;
-            int remainder = length % 16;
-            for (int i = 0; i < vectorCount; i++)
-            {
-                ref byte outputRef = ref output[pos + i * 16];
-                var outputVec = Vector128.LoadUnsafe(ref outputRef);
-                var xorVec = Vector128.Create(xorData.Slice(i * 16, 16));
-                var resultVec = Vector128.Xor<byte>(outputVec, xorVec);
-                resultVec.StoreUnsafe(ref outputRef);
-            }
-
-            // Handle remainder
-            for (int i = vectorCount * 16; i < length; i++)
-            {
-                output[pos + i] ^= xorData[i];
-            }
-        }
-        catch (Exception ex) when (ex is NotSupportedException || ex is PlatformNotSupportedException)
-        {
-            // Graceful fallback to scalar implementation
-            for (int i = 0; i < length; i++)
-            {
-                output[pos + i] ^= xorData[i];
-            }
-        }
-    }
-
-    private static unsafe void VectorCopy(ReadOnlySpan<byte> source, Span<byte> dest, int length, DeltaOptions options)
-    {
-        try
-        {
-            if (length < 16 || !UseSIMD(options))
-            {
-                // Scalar fallback
-                source.CopyTo(dest);
-                return;
-            }
-
-            // SIMD implementation
-            int vectorCount = length / 16;
-            int remainder = length % 16;
-            for (int i = 0; i < vectorCount; i++)
-            {
-                var srcVec = Vector128.Create(source.Slice(i * 16, 16));
-                srcVec.StoreUnsafe(ref dest[i * 16]);
-            }
-
-            // Handle remainder
-            source.Slice(vectorCount * 16, remainder).CopyTo(dest.Slice(vectorCount * 16, remainder));
-        }
-        catch (Exception ex) when (ex is NotSupportedException || ex is PlatformNotSupportedException)
-        {
-            // Graceful fallback to scalar implementation
-            source.CopyTo(dest);
-        }
-    }
-
-    #endregion
 
     /// <summary>
     /// Result of delta operations with success/failure information.
@@ -426,7 +205,7 @@ public static class DeltaZor
 
         var dataSpan = writer.WrittenSpan;
         // Fallback: If RLE is significantly larger than full replace, switch to full
-        if (usedRLE && dataSpan.Length > newData.Length * 1.5)
+        if (usedRLE && dataSpan.Length > newData.Length * options.CompressionThreshold)
         {
             // Discard RLE, write full replace
             writer.Clear(); // Reset buffer
@@ -448,9 +227,11 @@ public static class DeltaZor
             return false;
         }
 
-        // Write header
+        // Write header — set bit 7 of compression_type if checksum is present (self-describing format)
         BitConverter.TryWriteBytes(output, newData.Length);
-        output[4] = usedRLE ? CompressionType_RLE : CompressionType_FullReplace;
+        byte compressionTypeByte = usedRLE ? CompressionType_RLE : CompressionType_FullReplace;
+        if (options.EnableChecksum) compressionTypeByte |= ChecksumFlag;
+        output[4] = compressionTypeByte;
 
         // Copy data
         dataSpan.CopyTo(output.Slice(HeaderSize));
@@ -494,11 +275,13 @@ public static class DeltaZor
         if (output.Length < outputLength)
             return DeltaResult<bool>.Fail("Output buffer too small");
 
-        var options = DefaultOptions;
-        int checksumSize = options.EnableChecksum ? 4 : 0;
+        // Self-describing checksum: read flag from bit 7 of compression_type byte
+        bool hasChecksum = (compressionType & ChecksumFlag) != 0;
+        byte baseCompressionType = (byte)(compressionType & CompressionTypeMask);
+        int checksumSize = hasChecksum ? ChecksumSize : 0;
         ReadOnlySpan<byte> dataSpan = delta.Slice(HeaderSize, delta.Length - HeaderSize - checksumSize);
         uint expectedChecksum = 0;
-        if (options.EnableChecksum)
+        if (hasChecksum)
         {
             ReadOnlySpan<byte> checksumSpan = delta.Slice(delta.Length - checksumSize);
             expectedChecksum = BitConverter.ToUInt32(checksumSpan);
@@ -506,7 +289,7 @@ public static class DeltaZor
 
         // Apply compression
         bool success;
-        switch (compressionType)
+        switch (baseCompressionType)
         {
             case CompressionType_RLE:
                 success = DeltaDecoder.ApplyRLEDelta(oldData, dataSpan, output[..outputLength], DefaultOptions);
@@ -522,7 +305,7 @@ public static class DeltaZor
                 break;
 
             case CompressionType_FullReplace:
-                VectorCopy(dataSpan, output[..outputLength], outputLength, DefaultOptions);
+                dataSpan.CopyTo(output[..outputLength]);
                 success = true;
                 stats = new DeltaStats
                 {
@@ -536,10 +319,10 @@ public static class DeltaZor
                 break;
 
             default:
-                return DeltaResult<bool>.Fail($"Unknown compression type: {compressionType}");
+                return DeltaResult<bool>.Fail($"Unknown compression type: {baseCompressionType}");
         }
 
-        if (success && options.EnableChecksum)
+        if (success && hasChecksum)
         {
             uint actualChecksum = XxHash32Wrapper.Compute(output.Slice(0, outputLength));
             if (actualChecksum != expectedChecksum)
@@ -570,128 +353,6 @@ public static class DeltaZor
             CompressionType = "Analysis",
             UsedRLE = false
         };
-    }
-
-    #endregion
-
-    #region Private Implementation
-
-    private static DeltaOptions DefaultOptions => new() { UseSIMD = true, CompressionThreshold = 2.0 };
-
-    private static int EstimateDeltaSize(int oldLength, int newLength, DeltaOptions options)
-    {
-        // Simple conservative: Assume full replace worst-case
-        return HeaderSize + newLength + ChecksumSize;
-    }
-
-
-
-
-    private static int EstimateRLESizeForSpan(ReadOnlySpan<byte> span)
-    {
-        int size = 0;
-        int i = 0;
-        int len = span.Length;
-        while (i < len)
-        {
-            bool isZero = span[i] == 0;
-            int runLen = 1;
-            while (i + runLen < len && (span[i + runLen] == 0) == isZero) runLen++;
-            size += 1 + Get7BitEncodedSize(runLen);
-            if (!isZero) size += runLen;
-            i += runLen;
-        }
-
-        return size;
-    }
-
-
-
-
-
-
-
-
-
-    private static void Write7BitEncodedInt(IBufferWriter<byte> writer, int value)
-    {
-        Span<byte> oneByteSpan = stackalloc byte[1];
-        uint v = (uint)value;
-        while (v >= 0x80)
-        {
-            oneByteSpan[0] = (byte)(v | 0x80);
-            writer.Write(oneByteSpan);
-            v >>= 7;
-        }
-
-        oneByteSpan[0] = (byte)v;
-        writer.Write(oneByteSpan);
-    }
-
-    private static int Write7BitEncodedInt(Span<byte> span, int value)
-    {
-        int pos = 0;
-        uint v = (uint)value;
-        while (v >= 0x80)
-        {
-            span[pos++] = (byte)(v | 0x80);
-            v >>= 7;
-        }
-
-        span[pos++] = (byte)v;
-        return pos;
-    }
-
-    private static void Write7BitEncodedInt(BinaryWriter writer, int value)
-    {
-        uint v = (uint)value;
-        while (v >= 0x80)
-        {
-            writer.Write((byte)(v | 0x80));
-            v >>= 7;
-        }
-
-        writer.Write((byte)v);
-    }
-
-    private static int Get7BitEncodedSize(int value)
-    {
-        if (value < 0x80) return 1;
-        if (value < 0x4000) return 2;
-        if (value < 0x200000) return 3;
-        if (value < 0x10000000) return 4;
-        return 5;
-    }
-
-    private static double CalculateChangeDensity(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData)
-    {
-        int minLength = Math.Min(oldData.Length, newData.Length);
-        if (minLength == 0) return 1.0;
-
-        int changes = 0;
-        for (int i = 0; i < minLength; i++)
-        {
-            if (oldData[i] != newData[i]) changes++;
-        }
-
-        changes += Math.Abs(oldData.Length - newData.Length);
-
-        return (double)changes / minLength;
-    }
-
-    #endregion
-
-    #region Helper Types
-
-    /// <summary>
-    /// Computes XxHash32 checksums.
-    /// </summary>
-    public static class XxHash32Wrapper
-    {
-        public static uint Compute(ReadOnlySpan<byte> data)
-        {
-            return XxHash32.HashToUInt32(data);
-        }
     }
 
     #endregion

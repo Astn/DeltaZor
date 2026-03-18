@@ -36,8 +36,10 @@ fn computeSha256Hex(data: []const u8, allocator: mem.Allocator) ![]u8 {
     hasher.update(data);
     const digest = hasher.finalResult();
     var hex_buf: [64]u8 = undefined;
-    const hex = try fmt.bufPrint(&hex_buf, "{x}", .{digest});
-    return allocator.dupe(u8, hex);
+    for (digest, 0..) |byte, i| {
+        _ = try fmt.bufPrint(hex_buf[i * 2 ..][0..2], "{x:0>2}", .{byte});
+    }
+    return allocator.dupe(u8, &hex_buf);
 }
 
 

@@ -8,8 +8,7 @@ pub const bit_masks = blk: {
     break :blk arr;
 };
 
-pub fn crc32(data: []const u8) u32 {
-    // Using std.hash.XxHash32 instead of CRC32
+pub fn xxhash32(data: []const u8) u32 {
     return std.hash.XxHash32.hash(0, data);
 }
 
@@ -69,7 +68,7 @@ pub fn write7BitEncodedIntDirect(buffer: []u8, pos: *usize, value: usize) void {
 
 pub const Options = struct {
     compression_threshold: f64 = 0.95,
-    enable_checksum: bool = true,
+    enable_checksum: bool = false,
     max_stack_buffer_size: usize = 4096,
     use_simd: bool = true,
     enable_motif_detection: bool = true,

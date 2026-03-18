@@ -186,6 +186,7 @@ pub fn createDeltaWithStats(old_data: []const u8, new_data: []const u8, allocato
     buffer[pos] = @truncate(len32 >> 16); pos += 1;
     buffer[pos] = @truncate(len32 >> 24); pos += 1;
     const header_end = pos;
+    // Write compression_type placeholder; will be patched with checksum flag after encoding
     buffer[pos] = if (used_rle) @as(u8, 0x00) else @as(u8, 0x01); pos += 1;
     const data_start = pos;
 
@@ -199,30 +200,28 @@ pub fn createDeltaWithStats(old_data: []const u8, new_data: []const u8, allocato
 
     const rle_data_len = pos - data_start;
     var final_used_rle = used_rle;
-    var final_data_len = rle_data_len;
     if (used_rle and rle_data_len > new_data.len * 3 / 2) {
         // Fallback to full replace
         final_used_rle = false;
-        final_data_len = new_data.len;
-        // Realloc to exact size for full
-        const full_total_size = 9 + new_data.len;
+        // Realloc to exact size for full (+ optional checksum)
+        const full_total_size = 5 + new_data.len + (if (options.enable_checksum) @as(usize, 4) else @as(usize, 0));
         buffer = try allocator.realloc(buffer, full_total_size);
         pos = header_end;
-        buffer[pos] = 0x01; pos += 1; // type full
+        buffer[pos] = 0x01; pos += 1; // type full (no checksum flag yet)
         @memcpy(buffer[pos..pos + new_data.len], new_data);
         pos += new_data.len;
         pattern_counts = utils.OpCodeCounts{};
     }
 
-    const final_data_start = if (final_used_rle) data_start else header_end + 1;
-    const checksum = if (options.enable_checksum) utils.crc32(buffer[final_data_start..final_data_start + final_data_len]) else 0;
-
-    // Write checksum
-    const chk32 = checksum;
-    buffer[pos] = @truncate(chk32); pos += 1;
-    buffer[pos] = @truncate(chk32 >> 8); pos += 1;
-    buffer[pos] = @truncate(chk32 >> 16); pos += 1;
-    buffer[pos] = @truncate(chk32 >> 24); pos += 1;
+    // Set checksum flag (bit 7) in compression_type byte and append checksum over new_data
+    if (options.enable_checksum) {
+        buffer[header_end] |= 0x80; // set bit 7 to indicate checksum present
+        const checksum = utils.xxhash32(new_data);
+        buffer[pos] = @truncate(checksum); pos += 1;
+        buffer[pos] = @truncate(checksum >> 8); pos += 1;
+        buffer[pos] = @truncate(checksum >> 16); pos += 1;
+        buffer[pos] = @truncate(checksum >> 24); pos += 1;
+    }
 
     const actual_size = pos;
 

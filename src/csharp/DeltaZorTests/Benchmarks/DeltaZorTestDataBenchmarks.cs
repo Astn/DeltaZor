@@ -129,8 +129,8 @@ static DeltaZorTestDataBenchmarks()
     {
         // Try common build paths relative to src
         string[] possiblePaths = {
-            Path.Combine(srcDir, "csharp", "DeltaZor.TestGen", "bin", "Debug", "net9.0", "testdata"),
-            Path.Combine(srcDir, "csharp", "DeltaZor.TestGen", "bin", "Release", "net9.0", "testdata"),
+            Path.Combine(srcDir, "csharp", "DeltaZor.TestGen", "bin", "Debug", "net10.0", "testdata"),
+            Path.Combine(srcDir, "csharp", "DeltaZor.TestGen", "bin", "Release", "net10.0", "testdata"),
             Path.Combine(srcDir, "csharp", "DeltaZor.TestGen", "bin", "Debug", "net8.0", "testdata"),
             Path.Combine(srcDir, "csharp", "DeltaZor.TestGen", "bin", "Release", "net8.0", "testdata"),
             Path.Combine(srcDir, "csharp", "DeltaZor.TestGen", "testdata")

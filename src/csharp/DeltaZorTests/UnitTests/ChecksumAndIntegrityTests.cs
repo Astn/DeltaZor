@@ -12,7 +12,8 @@ namespace DZ.Tests.UnitTests
             // Arrange
             var oldData = new byte[] { 1, 2, 3, 4, 5 };
             var newData = new byte[] { 1, 9, 3, 4, 5 };
-            var delta = DeltaZor.CreateDelta(oldData, newData, out var stats);
+            var options = new DeltaZor.DeltaOptions { EnableChecksum = true };
+            var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);
 
             // Corrupt the checksum
             if (delta.Length >= 4)
@@ -26,7 +27,7 @@ namespace DZ.Tests.UnitTests
 
             // Assert
             Assert.False(result.Success);
-            Assert.Contains("Checksum validation failed", result.Error);
+            Assert.Contains("Checksum mismatch", result.Error);
         }
 
         [Fact(Skip = "Not yet implemented")]

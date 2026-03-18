@@ -43,7 +43,7 @@ pub fn build(b: *std.Build) void {
     const generate_testdata = b.addSystemCommand(&[_][]const u8{
         "cmd",
         "/c",
-        "echo Checking for test data... && if exist testdata\\manifest.json (echo Test data exists, skipping generation.) else (echo Generating test data... && cd ..\\..\\src\\csharp && dotnet build DeltaZor.TestGen\\DeltaZor.TestGen.csproj && dotnet run --project DeltaZor.TestGen\\DeltaZor.TestGen.csproj && if not exist ..\\..\\src\\zig\\testdata mkdir ..\\..\\src\\zig\\testdata && xcopy /E /I DeltaZor.TestGen\\bin\\Debug\\net9.0\\testdata\\* ..\\..\\src\\zig\\testdata\\ /Y && cd ..\\..\\src\\zig)",
+        "echo Checking for test data... && if exist testdata\\manifest.json (echo Test data exists, skipping generation.) else (echo Generating test data... && cd ..\\..\\src\\csharp && dotnet build DeltaZor.TestGen\\DeltaZor.TestGen.csproj && dotnet run --project DeltaZor.TestGen\\DeltaZor.TestGen.csproj && if not exist ..\\..\\src\\zig\\testdata mkdir ..\\..\\src\\zig\\testdata && xcopy /E /I DeltaZor.TestGen\\bin\\Debug\\net10.0\\testdata\\* ..\\..\\src\\zig\\testdata\\ /Y && cd ..\\..\\src\\zig)",
     });
     generate_testdata.has_side_effects = true;
     generate_testdata.setName("generate-testdata");

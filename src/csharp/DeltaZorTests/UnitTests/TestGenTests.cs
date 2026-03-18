@@ -18,7 +18,7 @@ public class DeltaFileValidationTests
         UseSIMD = true,
         EnableMotifDetection = true,
         EnableChecksum = false,
-        CompressionThreshold = 0.5
+        CompressionThreshold = 1.5
     };
 
     private static string ComputeSha256(byte[] data)

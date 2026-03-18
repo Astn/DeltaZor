@@ -90,17 +90,18 @@ namespace DZ.Tests.UnitTests
                 newData[i] = (byte)(i % 10);
             }
             
-            // Create a pattern: [NZR2, ZR2] repeated 5 times
-            // Change the first 2 bytes of each 4-byte block
+            // Create a uniform XOR pattern: [0x01, 0x02, 0x00, 0x00] repeated 5 times
+            // Use XOR to ensure the delta is truly uniform across all blocks
             for (int block = 0; block < 5; block++)
             {
                 int offset = block * 4;
-                newData[offset] = (byte)((oldData[offset] + 1) % 256);
-                newData[offset + 1] = (byte)((oldData[offset + 1] + 2) % 256);
+                newData[offset] = (byte)(oldData[offset] ^ 0x01);
+                newData[offset + 1] = (byte)(oldData[offset + 1] ^ 0x02);
             }
 
-            // Act
-            var delta = DeltaZor.CreateDelta(oldData, newData, out var stats);
+            // Act — use explicit threshold to ensure RLE is used (default 0.95 may trigger FullReplace fallback)
+            var options = new DeltaZor.DeltaOptions { CompressionThreshold = 2.0 };
+            var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);
             var output = new byte[newData.Length];
             var result = DeltaZor.ApplyDelta(oldData.AsSpan(), delta.AsSpan(), output.AsSpan(), out _);
 

@@ -16,9 +16,9 @@ namespace DZ.Tests.UnitTests
             var delta = DeltaZor.CreateDelta(data, data, out var stats);
 
             // Assert
-            // New format: [output_length:4][compression_type:1][data...][checksum:4]
-            // For identical arrays, should use RLE with all zeros
-            Assert.True(delta.Length >= 9); // Header + checksum + minimal data
+            // Format: [output_length:4][compression_type:1][data...]
+            // Checksum is optional (off by default), so minimum is 5 (header) + data
+            Assert.True(delta.Length >= 5); // Header + minimal data
             int outputLength = BitConverter.ToInt32(delta, 0);
             byte compressionType = delta[4];
 
@@ -42,7 +42,8 @@ namespace DZ.Tests.UnitTests
 
             // Assert
             // Should choose full replace for high change density
-            Assert.True(delta.Length >= 13);
+            // Minimum: 5 header + 5 data (checksum off by default)
+            Assert.True(delta.Length >= 10);
             int outputLength = BitConverter.ToInt32(delta, 0);
             byte compressionType = delta[4];
 

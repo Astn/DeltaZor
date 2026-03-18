@@ -19,7 +19,7 @@ public class Test010_UniformInt32_1M : ITestCase
     {
         if (!_base.IsEmpty) return _base;
         var buf = new byte[Count * 4];
-        var span = MemoryMarshal.Cast<byte, int>(buf);
+        var span = MemoryMarshal.Cast<byte, int>(buf.AsSpan());
         var rng = new Random(0xDE17A20);
         for (int i = 0; i < Count; i++)
             span[i] = rng.Next();
@@ -31,7 +31,7 @@ public class Test010_UniformInt32_1M : ITestCase
         if (!_next.IsEmpty) return _next;
         var baseSpan = MemoryMarshal.Cast<byte, int>(GenerateBase().Span);
         var buf = new byte[baseSpan.Length * 4];
-        var nextSpan = MemoryMarshal.Cast<byte, int>(buf);
+        var nextSpan = MemoryMarshal.Cast<byte, int>(buf.AsSpan());
         for (int i = 0; i < Count; i++)
             nextSpan[i] = baseSpan[i] + 5;
         return _next = buf;

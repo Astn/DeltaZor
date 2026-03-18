@@ -17,8 +17,9 @@ namespace DZ.Tests.UnitTests
                 newData[i] = 1; // Create 150 differences
             }
 
-            // Act
-            var delta = DeltaZor.CreateDelta(oldData, newData, out var createStats);
+            // Act — use high threshold to ensure RLE is used, disable motifs to test pure RLE behavior
+            var options = new DeltaZor.DeltaOptions { CompressionThreshold = 2.0, EnableMotifDetection = false };
+            var delta = DeltaZor.CreateDelta(oldData, newData, options, out var createStats);
             var output = new byte[newData.Length];
             var result = DeltaZor.ApplyDelta(oldData.AsSpan(), delta.AsSpan(), output.AsSpan(), out var applyStats);
 

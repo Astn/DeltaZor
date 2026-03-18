@@ -127,7 +127,7 @@ namespace DZ.Tests.UnitTests
             for (int i = 0; i < 512; i++)
                 newData[i] = (byte)random.Next(256);
 
-            var options = new DeltaZor.DeltaOptions { UseSIMD = true, SimdMinThreshold = 32, CompressionThreshold = 0.0 };
+            var options = new DeltaZor.DeltaOptions { UseSIMD = true, SimdMinThreshold = 32, CompressionThreshold = 2.0 };
 
             // Act
             var delta = DeltaZor.CreateDelta(oldData, newData, options, out var createStats);

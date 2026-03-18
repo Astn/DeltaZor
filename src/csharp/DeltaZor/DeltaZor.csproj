@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
     <PropertyGroup>
-        <TargetFramework>net9.0</TargetFramework>
+        <TargetFramework>net10.0</TargetFramework>
         <LangVersion>latest</LangVersion>
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
@@ -9,6 +9,10 @@
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
         <RootNamespace>DZ</RootNamespace>
     </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="System.IO.Hashing" Version="9.0.4" />
+    </ItemGroup>
 
     <ItemGroup>
         <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">

@@ -16,12 +16,11 @@ namespace DZ.Tests.UnitTests
             // Create an actual RLE delta to compare against
             var delta = DeltaZor.CreateDelta(oldData, newData, out var stats);
             
-            // Extract the data portion (without header and checksum)
+            // Extract the data portion (without header)
             // Header is 5 bytes (4 for length + 1 for compression type)
-            // Checksum is 4 bytes
+            // Checksum is off by default, so no trailing bytes to skip
             const int headerSize = 5;
-            const int checksumSize = 4;
-            var dataPortion = delta.AsSpan().Slice(headerSize, delta.Length - headerSize - checksumSize);
+            var dataPortion = delta.AsSpan().Slice(headerSize);
             int actualRleSize = dataPortion.Length;
 
             // Assert
@@ -70,11 +69,10 @@ namespace DZ.Tests.UnitTests
 
             // Assert
             // Header is 5 bytes (4 for length + 1 for compression type)
-            // Checksum is 4 bytes
+            // Checksum is off by default, so minimum is just the header
             const int headerSize = 5;
-            const int checksumSize = 4;
-            Assert.True(deltaStrict.Length >= headerSize + checksumSize);
-            Assert.True(deltaRelaxed.Length >= headerSize + checksumSize);
+            Assert.True(deltaStrict.Length >= headerSize);
+            Assert.True(deltaRelaxed.Length >= headerSize);
             
             byte compressionTypeStrict = deltaStrict[4];
             byte compressionTypeRelaxed = deltaRelaxed[4];
