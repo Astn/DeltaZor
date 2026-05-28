@@ -241,8 +241,8 @@ public readonly struct PatternCounts
     public int ExtensionCount { get; init; }      // 0x02
     public int TruncationCount { get; init; }     // 0x03
     public int ChannelRunCount { get; init; }     // 0x08
-    public int FloatPatternCount { get; init; }   // Future: 0x04
-    public int HalfPatternCount { get; init; }    // Future: 0x05
+    public int FloatPatternCount { get; init; }   // Future: 0x06
+    public int HalfPatternCount { get; init; }    // Future: 0x07
 }
 ```
 
@@ -376,15 +376,21 @@ pub const Config = struct {
 
 ---
 
-# Benchmarks (Shared Test Vectors)
+# Benchmarks (Projected Targets)
+
+> **Status legend:** ✅ = achievable today by the implemented core (RLE+XOR / MOTIF);
+> 📋 = requires a *planned* compression mode (arithmetic / channel) and is a projected
+> design target, **not implemented**. All byte sizes are illustrative design targets — there
+> is no automated benchmark harness yet; the only executed cross-language suite is the 43-case
+> shared parity test-vector set.
 
 | Test | Data | C# | Zig |
 |------|------|----|-----|
 | `Sparse_1KB` | 1% changed | ✅ <50 B | <50 B |
-| `Uniform_Int_1M` | +5 | ✅ 8 B | 8 B |
+| `Uniform_Int_1M` | +5 (arithmetic) | 📋 8 B (planned) | 📋 8 B (planned) |
 | `Color_Fill_200x200` | Fill tool | ✅ ~30 B | ~30 B |
-| `1080p_Tint` | R+10 | ✅ 20 B | 20 B |
-| `RGBA_AlphaOnly` | Alpha channel edit | ✅ ~25% of original | ~25% of original |
+| `1080p_Tint` | R+10 (channel/arithmetic) | 📋 20 B (planned) | 📋 20 B (planned) |
+| `RGBA_AlphaOnly` | Alpha channel edit (channel) | 📋 ~25% of original (planned) | 📋 ~25% (planned) |
 
 ---
 
