@@ -75,13 +75,100 @@ The dev correctly STOPPED on zig 0.16 (the `std.Io` overhaul is a real behaviora
 
 ```
 zig build test   →  EXIT=0
-43/43 tests ran; "No leak" reported for every test (1..43).
+4 zig test functions pass; they iterate 42 VALID vectors from the 43-entry corpus (manifest entry 8 is intentionally invalid/skipped — TASK-0403 codex condition). "No leak" reported for every vector.
 ```
 
-**Result: C#↔Zig byte-identical parity is VERIFIED.** All 43 shared test vectors (the C# `DeltaZor.TestGen` corpus under `testdata/`) are byte-compared by `tests.zig` and pass on the Zig side, with no memory leaks. This satisfies TASK-0356 (the EPIC-0043 zig-side verification gate) on the project's target toolchain.
+**Result: C#↔Zig byte-identical parity is VERIFIED.** The 42 valid shared test vectors (the C# `DeltaZor.TestGen` corpus under `testdata/`; entry 8 intentionally invalid/skipped) are byte-compared by `tests.zig` (`expectEqualSlices` create-delta + round-trip) and pass on the Zig side, with no memory leaks. This satisfies TASK-0356 (the EPIC-0043 zig-side verification gate) on the project's target toolchain.
 
 **Toolchain findings (for TASK-0371):**
 - DeltaZor zig targets **0.15.x** — `build.zig` (addLibrary+createModule API) + `tests.zig` (`GeneralPurposeAllocator`, `std.fs` I/O) all compile + pass on 0.15.1.
 - On **0.16.0**: `zig build` (engine library) compiles clean, but `zig build test` does not (GPA→DebugAllocator rename + the `std.fs`→`std.Io` overhaul ~12 sites). A deliberate 0.16 `std.Io` migration is a separate task; until then, **pin 0.15.x via `build.zig.zon` (TASK-0371)**.
 
 TASK-0356 → review (parity confirmed on 0.15.1; codex independent re-run to follow).
+
+---
+
+## Cross-kind audit (codex on claude/orchestrator)
+
+- **Date:** 2026-05-28
+- **Auditor:** codex, independent cross-kind audit of claude DEV STOP plus orchestrator 0.15.1 verification.
+- **Working dir:** `C:/Users/austi/src/DeltaZor/src/zig`
+- **Graph:** not updated.
+
+### Guardrails
+
+- HEAD guard passed: `git rev-parse --short HEAD` -> `0671c7d`.
+- Recent history shows the expected TASK-0356 doc-only commits:
+  - `0671c7d docs(deltazor): TASK-0356 - zig 0.15.1 build test PASSES (C#<->Zig parity verified)`
+  - `e5cb8b8 docs(deltazor): TASK-0356 - STOP, zig 0.16 tests blocked beyond GPA rename (std.Io cascade)`
+- Pre-append worktree guard passed: `git status --short` was clean, and `git status --short -- src/zig` was clean.
+- `git show --name-only` confirms both `0671c7d` and `e5cb8b8` touched only this exec-log document, not Zig sources.
+
+### A. 0.15.1 parity rerun
+
+- The exact requested command was attempted with the extracted 0.15.1 compiler:
+  - `C:/Users/austi/AppData/Local/Temp/zig0151/zig-x86_64-windows-0.15.1/zig.exe build test`
+  - Result in this Codex sandbox: `EXIT=1`, blocked before compiling the test binary by `error.Unexpected: GetLastError(5): Access is denied` in `std/process/Child.zig` while Zig's build runner tried to spawn the compiler subprocess.
+  - Re-running with `--global-cache-dir` inside the repo removed the global-cache permission issue but hit the same Windows async-pipe spawn guard. This appears to be a sandbox subprocess restriction, not a DeltaZor source failure.
+- Direct test execution evidence:
+  - Executed the 0.15.1 test executable from `.zig-cache/o/6d755766c2b482277142c6a30514526a/test.exe` in `src/zig`.
+  - Result: `EXIT=0`; output ended with `All 4 tests passed.`
+  - The four Zig test declarations ran: `apply`, `create delta`, `round trip`, and `allocation free all`.
+  - The loops exercised valid manifest entries 1-7 and 9-43. Static manifest count: `totalTests=43`, manifest entries=43, `.delta.bin` files=43, valid entries=42, invalid/skipped id=8 (`isValid=false`).
+- Audit correction: the prior "43/43" wording is imprecise if read as vector executions. The harness executes 42 valid vectors, because entry 8 is explicitly invalid and skipped by `if (!entry.isValid) continue;`. The approximate corpus-size claim remains true, but the precise parity wording should be "all 42 valid vectors from the 43-entry C# corpus."
+
+### B. Parity test is real, not hollow
+
+Confirmed. `src/tests.zig` is a real byte-parity harness:
+
+- Reads `testdata/manifest.json`, which is produced/copied by `build.zig` from the C# `DeltaZor.TestGen` corpus when missing.
+- For each valid manifest entry, reads `testdata/{baseFile}`, `testdata/{nextFile}`, and `testdata/{deltaFile}`.
+- Verifies base, next, and expected-delta SHA-256 values with `testing.expectEqualStrings`.
+- `apply` test feeds the C# `.delta.bin` bytes to `DeltaZor.applyDelta(...)` and asserts `testing.expectEqualSlices(u8, output, next_bytes)`.
+- `create delta` test runs `DeltaZor.createDelta(...)`, asserts the computed delta length equals `entry.deltaSize`, then asserts `testing.expectEqualSlices(u8, expected_delta, computed_delta)`.
+- `round trip` test creates a Zig delta, applies it, and asserts the reconstructed output byte-equals `next_bytes`.
+- `allocation free all` is the leak check; the "No leak" lines are not the parity assertion. The byte-equality assertions above are the parity gate.
+
+Conclusion: `EXIT=0` from this test binary means the Zig implementation byte-matches the C# corpus for every valid vector it exercises; it is not merely a no-crash/no-leak check.
+
+### C. 0.16 STOP justification
+
+Confirmed.
+
+- Installed PATH Zig is `0.16.0`.
+- Direct 0.16 compile probe on current sources with local cache dirs reproduced wave 1: four `std.heap.GeneralPurposeAllocator` errors in `src/tests.zig`.
+- Local 0.16 stdlib inspection confirms the dev's wave 2 analysis:
+  - `std/heap.zig` exports `DebugAllocator`; `GeneralPurposeAllocator` is absent.
+  - `std/Io/Dir.zig` has `pub fn cwd() Dir` and `pub fn openFile(dir: Dir, io: Io, sub_path: []const u8, options: OpenFileOptions)`.
+  - `std/Io/File.zig` has `pub fn close(file: File, io: Io) void` and `pub fn reader(file: File, io: Io, buffer: []u8) Reader`.
+  - `readToEndAlloc` was not found on the 0.16 file API surface inspected.
+  - `lib/std/fs/` no longer contains the old Dir/File implementation shape used by these tests.
+
+The STOP was the right call. The GPA rename is mechanical, but the follow-on file I/O migration requires threading `Io`, changing close/read patterns, and choosing buffer/reader behavior. That is behavior-sensitive in a parity harness and should not be forced inline just to make tests green.
+
+### D. Clean tree / no papering
+
+Confirmed before this audit append:
+
+- `git status --short` clean.
+- `git status --short -- src/zig` clean.
+- `git diff -- src/zig` empty.
+- The two TASK-0356 commits are exec-log/doc-only commits.
+
+No Zig source was modified to make tests pass. Any cache artifacts touched during audit were ignored build/cache outputs, not source changes.
+
+### E. TASK-0371 recommendation
+
+Confirmed sound.
+
+- DeltaZor's current Zig source and test harness are authored against the 0.15-era APIs and pass under the project's target toolchain per orchestrator's no-sandbox 0.15.1 run, with this audit confirming the harness is a real byte-compare.
+- Pinning the supported 0.15.x line in `build.zig.zon` is the lowest-risk way to make the verification gate reproducible.
+- A 0.16 `std.Io` migration should be a separate task with deliberate review, because it changes the parity harness I/O path.
+
+### Findings
+
+- No blocking finding against the C#<->Zig parity headline for the valid corpus.
+- Condition 1: this Codex sandbox could not independently complete the exact `zig build test` command because Zig subprocess creation is blocked here. I did execute the 0.15.1 test binary successfully and audited the harness statically.
+- Condition 2: adjust wording from "43/43 vectors ran" to "42 valid vectors from a 43-entry corpus ran"; manifest entry 8 is invalid and intentionally skipped.
+
+**VERDICT: APPROVED-WITH-CONDITIONS**
