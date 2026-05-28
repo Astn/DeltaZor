@@ -84,7 +84,8 @@ Re-read of edited Plan.md sections confirms **no remaining false
 ## Handoff packet
 
 - **Status:** review (cross-kind claude audit pending).
-- **Commit SHA:** `46f0bd5` (single commit on `master`, not pushed).
+- **Commit SHA:** `42b3346` (single commit on `master`, not pushed; this exec-log
+  SHA-backfill line was added in a tiny follow-up commit on top).
 - **Files changed:** `Plan.md` (+ this exec log).
 - **Evidence paths:** this log; `docs/develop/2026-05-28_deltazor-intake-audit.md`
   (drift §); commit `f4afe0d` (checksum reality);
