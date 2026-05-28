@@ -200,7 +200,9 @@ pub fn createDeltaWithStats(old_data: []const u8, new_data: []const u8, allocato
 
     const rle_data_len = pos - data_start;
     var final_used_rle = used_rle;
-    if (used_rle and rle_data_len > new_data.len * 3 / 2) {
+    // Fallback threshold honors options.compression_threshold (parity with C#:
+    // `dataSpan.Length > newData.Length * options.CompressionThreshold`, double arithmetic).
+    if (used_rle and @as(f64, @floatFromInt(rle_data_len)) > @as(f64, @floatFromInt(new_data.len)) * options.compression_threshold) {
         // Fallback to full replace
         final_used_rle = false;
         // Realloc to exact size for full (+ optional checksum)

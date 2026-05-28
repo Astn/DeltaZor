@@ -67,7 +67,7 @@ pub fn write7BitEncodedIntDirect(buffer: []u8, pos: *usize, value: usize) void {
 }
 
 pub const Options = struct {
-    compression_threshold: f64 = 0.95,
+    compression_threshold: f64 = 1.5,
     enable_checksum: bool = false,
     max_stack_buffer_size: usize = 4096,
     use_simd: bool = true,
