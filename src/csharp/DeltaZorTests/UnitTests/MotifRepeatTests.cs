@@ -99,7 +99,7 @@ namespace DZ.Tests.UnitTests
                 newData[offset + 1] = (byte)(oldData[offset + 1] ^ 0x02);
             }
 
-            // Act — use explicit threshold to ensure RLE is used (default 0.95 may trigger FullReplace fallback)
+            // Act — use explicit threshold to ensure RLE is used (default 1.5 may trigger FullReplace fallback)
             var options = new DeltaZor.DeltaOptions { CompressionThreshold = 2.0 };
             var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);
             var output = new byte[newData.Length];
