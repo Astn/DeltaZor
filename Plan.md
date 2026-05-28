@@ -32,10 +32,9 @@
 - ✅ **Critical Bug Fixes**: Fixed hardcoded RLE usage and incorrect compression threshold (0.95 → 0.5)
 - ✅ **Test Suite Modernization**: Restructured monolithic test file into 9 specialized test classes
 - ✅ **Comprehensive Test Coverage**: Implemented 13 core tests, documented 16 advanced feature tests
-- ✅ **Low-Risk Float Pattern Detection**: Added cache-line efficient float detection (64 bytes fixed analysis)
+- 📋 **Float Pattern Detection (Planned)**: Cache-line efficient float detection is designed but not implemented in the core library — `FloatPatternCount` is reserved in `OpCodeCounts` (`DeltaZor.cs`, marked `// 0x06 (Planned)`) and always reads 0; no float/half opcode is emitted or decoded
 - ✅ **Platform Stability**: Resolved ARM/x64 execution issues
-- ✅ **Pattern Counts Feature**: Added opcode tracking for diagnostic information
-- ✅ **Channel Pattern Detection**: Implemented automatic detection and optimization for channel-based data
+- ✅ **Pattern Counts Feature**: Added opcode tracking for diagnostic information (the `ChannelRunCount` slot is reserved for the planned channel opcode and always reads 0 today)
 - ✅ **Motif Detection Refinement**: Completed lazy, single-accumulator motif detection with bit-packed SIMD vectors for variable UnitSizes 2-8, enabling single-pass variable-length probing at opcode boundaries with allocation-free stack operations and O(1) amortized cost per opcode.
 
 ## Current Focus
@@ -53,11 +52,11 @@
 | 2 | **SIMD Acceleration** | 4–8× faster on large buffers | ✅ Complete (`Vector128`) | `std.simd`, `@Vector` |
 | 3 | **Zero-Allocation API** | No GC in hot paths | ✅ Complete (`ReadOnlySpan<byte>`) | `[]const u8`, `[]u8` |
 | 4 | **7-bit Varint** | Compact run lengths | ✅ Complete (`Write7BitEncodedInt`) | `writeVarint`, `readVarint` |
-| 5 | **CRC32 Checksum** | Corruption detection | ✅ Complete (`Crc32.Compute`) | `crc32.zig` (lookup table) |
+| 5 | **XxHash32 Checksum** | Corruption detection | ✅ Complete (`XxHash32Wrapper.Compute` → `System.IO.Hashing.XxHash32`) | `std.hash.XxHash32` (`utils.zig`) |
 | 6 | **Hybrid Strategy** | Always optimal size | ✅ Fixed (`ShouldUseRLE` threshold) | `estimate_rle_size` |
 | 7 | **Full Replace** | Safe fallback | ✅ Complete (`CompressionType_FullReplace`) | `TYPE_FULL` |
-| 8 | **Unified Header** | Interop, versioning | ✅ Complete (`[len:4][type:1][data][crc:4]`) | Same binary layout |
-| 9 | **Channel Pattern Detection** | ... | ✅ Complete (`RLE_ChannelRun`) | `OP_CHANNEL_RUN` |
+| 8 | **Unified Header** | Interop, versioning | ✅ Complete (`[len:4][type:1][data][checksum:4]`) | Same binary layout |
+| 9 | **Channel Pattern Detection** | ... | 📋 Planned (`RLE_ChannelRun = 0x08` opcode + `ChannelPattern` struct reserved in `Utils.cs`; not emitted or decoded — `AnalyzeChannelPattern` absent, `OpCodeCounts.ChannelRunCount` marked `// (Planned)`) | Planned |
 | 9.1 | **Motif Repeat Detection (Refined)** | Sparse repeating patterns with variable UnitSizes 2-8 via lazy single-accumulator | ✅ Complete: Single MotifAccumulator with Vector256-packed rolling masks/hashes, lazy updates at opcode boundaries for allocation-free, SIMD-accelerated detection | `motif_accum.zig`: @Vector-packed state with inline bit ops for single-pass probing |
 | 10 | **Pattern Counts** | ... | ✅ Complete (`PatternCounts`) | `pattern_counts.zig` |
 
@@ -102,11 +101,11 @@
 
 ---
 
-## 5. CRC32 Checksum
+## 5. XxHash32 Checksum
 
 | **Why** | **C#** | **Zig** |
 |-------|--------|--------|
-| Detect bit flips | Table-based | `const crc_table = ...;` |
+| Detect bit flips | `System.IO.Hashing.XxHash32.HashToUInt32` | `std.hash.XxHash32.hash` |
 | Optional | `EnableChecksum` | `config.checksum` |
 
 ---
@@ -138,7 +137,9 @@
 
 ---
 
-## 9. Channel Pattern Detection
+## 9. Channel Pattern Detection (Planned)
+
+> **Status:** Planned / not implemented. The `RLE_ChannelRun = 0x08` opcode constant and the `ChannelPattern` struct are reserved in `Utils.cs`, but the channel opcode is **never emitted or decoded**: there is no `AnalyzeChannelPattern` method, the encoder/decoder do not reference `RLE_ChannelRun`, and `OpCodeCounts.ChannelRunCount` is marked `// (Planned)` in `DeltaZor.cs`. The design below is the intended approach; the code samples are illustrative of the planned shape, not the current implementation.
 
 ### **Why It Matters**
 Channel pattern detection provides massive compression improvements for structured data like:
@@ -257,8 +258,8 @@ public readonly struct PatternCounts
 
 | # | Feature | Why It Matters | C# | Zig |
 |---|--------|----------------|----|-----|
-| 11 | **Global Arithmetic** | `+5` on 1M ints → 8 B | ✅ In Progress (Float Detection) | `detect_global_shift` |
-| 12 | **Planar Arithmetic** | `R+10` on 1080p → 20 B | ✅ In Progress (Float Detection) | `planar_detect` |
+| 11 | **Global Arithmetic** | `+5` on 1M ints → 8 B | 📋 Planned (`RLE_Arithmetic = 0x09` constant reserved; not wired into encode/decode; `ArithmeticCompressionTests` all `[Skip]`) | Planned |
+| 12 | **Planar Arithmetic** | `R+10` on 1080p → 20 B | 📋 Planned (`RLE_Planar = 0x0A` constant reserved; not wired; tests `[Skip]`) | Planned |
 | 13 | **Per-Run Arithmetic** | Fill tool → 30 B; nestable with motifs for sparse runs | Planned (integrate with MotifAccumulator for hybrid detection) | `try_run_arithmetic` (with motif_accum hooks) |
 | 14 | **RunArithmetic Opcode** | Local uniform edits | Planned | `OP_ARITH_RUN` |
 | 15 | **Clamp-Aware** | `255+10=255` | Planned | `clamp_u8` |
@@ -393,9 +394,9 @@ pub const Config = struct {
 |---------|-------|-----|
 | **v0.1** | C# Core (RLE+XOR, SIMD) | ✅ Complete |
 | **v0.2** | Zig Port (RLE+XOR) | +1 week |
-| **v0.3** | Arithmetic (Global + Planar); motif refinement with lazy single-accumulator detection | ✅ Complete (refinement done; +0 weeks) |
-| **v0.4** | RunArithmetic + Clamp | +1 week |
-| **v0.5** | Channel Runs + Pattern Counts | ✅ Complete |
+| **v0.3** | Motif refinement with lazy single-accumulator detection (Arithmetic Global + Planar deferred) | 🔄 Motif refinement ✅ done; Arithmetic 📋 planned |
+| **v0.4** | RunArithmetic + Clamp | 📋 Planned |
+| **v0.5** | Pattern Counts ✅ done; Channel Runs 📋 planned (opcode reserved, not wired) | 🔄 Partial |
 | **v0.6** | Auto-Mode + Interop Tests | +1 week |
 | **v1.0** | NuGet + Zig Lib + WASM + Docs | +2 weeks |
 
