@@ -66,3 +66,22 @@ Either way: once a toolchain is pinned and the harness compiles, re-run `zig bui
 - **Re-verify commands:** `zig version` → 0.16.0; `zig build` → ok; `zig build test` → 4 errors (GPA) → after DebugAllocator rename, 4 errors (`fs.cwd`).
 - **Next action owner:** decide path 1 vs 2 above (TASK-0371 covers the pin).
 - **Confidence:** High. Errors are deterministic and reproduced directly from the installed 0.16 stdlib; the `std.Io` signatures were read from the actual toolchain (`Io/Dir.zig`, `Io/File.zig`, `heap/debug_allocator.zig`).
+
+---
+
+## Orchestrator verification on zig 0.15.1 (the project's target toolchain) — PARITY CONFIRMED
+
+The dev correctly STOPPED on zig 0.16 (the `std.Io` overhaul is a real behavioral migration, not a clean rename — would risk silently mutating how the parity corpus is read). Per the dev's recommendation, the orchestrator verified on the project's actual target, **zig 0.15.1** (downloaded from ziglang.org to `C:/Users/austi/AppData/Local/Temp/zig0151/zig-x86_64-windows-0.15.1/zig.exe`), with **NO source changes** (clean tree):
+
+```
+zig build test   →  EXIT=0
+43/43 tests ran; "No leak" reported for every test (1..43).
+```
+
+**Result: C#↔Zig byte-identical parity is VERIFIED.** All 43 shared test vectors (the C# `DeltaZor.TestGen` corpus under `testdata/`) are byte-compared by `tests.zig` and pass on the Zig side, with no memory leaks. This satisfies TASK-0356 (the EPIC-0043 zig-side verification gate) on the project's target toolchain.
+
+**Toolchain findings (for TASK-0371):**
+- DeltaZor zig targets **0.15.x** — `build.zig` (addLibrary+createModule API) + `tests.zig` (`GeneralPurposeAllocator`, `std.fs` I/O) all compile + pass on 0.15.1.
+- On **0.16.0**: `zig build` (engine library) compiles clean, but `zig build test` does not (GPA→DebugAllocator rename + the `std.fs`→`std.Io` overhaul ~12 sites). A deliberate 0.16 `std.Io` migration is a separate task; until then, **pin 0.15.x via `build.zig.zon` (TASK-0371)**.
+
+TASK-0356 → review (parity confirmed on 0.15.1; codex independent re-run to follow).
