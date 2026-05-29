@@ -196,6 +196,38 @@ pub fn applyDelta(old_data: []const u8, delta: []const u8, output: []u8, allocat
                         }
                         pos += unit_size * repeat_length;
                     },
+                    utils.RLE_FLOAT_RUN => { // float run 0x06
+                        // [flags][laneCount:7bit][bitmap: ceil(laneCount/8)][packed: 4*changedLanes]
+                        // Mirrors C# Encoder.cs TryEmitFloatRun (source of truth).
+                        const flags = try readByte(&reader_pos, data);
+                        if (flags != 0x00) return error.Invalid; // reserved flags must be zero
+                        const lane_count = try read7bit(&reader_pos, data);
+                        if (lane_count < 2) return error.Invalid;
+                        const lane_size: usize = 4;
+                        const span = lane_count * lane_size;
+                        if (pos + span > output.len) return error.Invalid;
+
+                        const bitmap_bytes = (lane_count + 7) / 8;
+                        const bitmap_start = reader_pos;
+                        reader_pos += bitmap_bytes;
+                        if (reader_pos > data.len) return error.EOF;
+                        const bitmap = data[bitmap_start..reader_pos];
+
+                        var l: usize = 0;
+                        while (l < lane_count) : (l += 1) {
+                            const bit = (bitmap[l >> 3] & (@as(u8, 1) << @intCast(l & 7))) != 0;
+                            if (!bit) continue;
+                            const lane_start = reader_pos;
+                            reader_pos += lane_size;
+                            if (reader_pos > data.len) return error.EOF;
+                            const base_off = pos + l * lane_size;
+                            output[base_off] ^= data[lane_start];
+                            output[base_off + 1] ^= data[lane_start + 1];
+                            output[base_off + 2] ^= data[lane_start + 2];
+                            output[base_off + 3] ^= data[lane_start + 3];
+                        }
+                        pos += span;
+                    },
                     else => return error.InvalidOpcode,
                 }
             }

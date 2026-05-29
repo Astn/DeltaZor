@@ -155,6 +155,34 @@ public static class DeltaDecoder
                 }
                     break;
 
+                case DeltaUtils.RLE_FloatRun:
+                {
+                    // FloatRun 0x06: [flags][laneCount:7bit][bitmap: ceil(laneCount/8)][packed: 4*changedLanes]
+                    // Mirrors Encoder.cs TryEmitFloatRun (source of truth).
+                    if (!reader.TryReadByte(out byte floatFlags)) return false;
+                    if (floatFlags != 0x00) return false; // reserved flags must be zero
+                    if (!reader.TryRead7BitEncodedInt(out int laneCount)) return false;
+                    if (laneCount < 2) return false;
+                    const int LaneSize = 4;
+                    int span = laneCount * LaneSize;
+                    if (pos + span > output.Length) return false;
+
+                    int bitmapBytes = (laneCount + 7) / 8;
+                    ReadOnlySpan<byte> bitmap = reader.Read(bitmapBytes);
+                    for (int l = 0; l < laneCount; l++)
+                    {
+                        if ((bitmap[l >> 3] & (1 << (l & 7))) == 0) continue;
+                        ReadOnlySpan<byte> laneXor = reader.Read(LaneSize);
+                        int baseOff = pos + l * LaneSize;
+                        output[baseOff] ^= laneXor[0];
+                        output[baseOff + 1] ^= laneXor[1];
+                        output[baseOff + 2] ^= laneXor[2];
+                        output[baseOff + 3] ^= laneXor[3];
+                    }
+                    pos += span;
+                }
+                    break;
+
                 default:
                     return false; // Invalid opcode
             }

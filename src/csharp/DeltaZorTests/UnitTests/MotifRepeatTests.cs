@@ -152,9 +152,12 @@ namespace DZ.Tests.UnitTests
             Console.WriteLine($"UsedRLE: {stats.UsedRLE}");
             Console.WriteLine($"CompressionType: {stats.CompressionType}");
             
-            // We should have some pattern counts since we have changes
-            // Expecting at least 1 NonZeroRunCount and some ZeroRunCount
-            Assert.True(stats.OpCodeCounts.NonZeroRunCount > 0 || stats.OpCodeCounts.ZeroRunCount > 0);
+            // We should have some pattern counts since we have changes. The exact opcode
+            // mix may include a FloatRun (0x06): this 100-byte buffer with 10 single-byte
+            // changes every 10 bytes is encoded as a strict-win FloatRun (float32-lane
+            // sparse run), so accept any tracked RLE-stream opcode, not just Zero/NonZero.
+            Assert.True(stats.OpCodeCounts.NonZeroRunCount > 0 || stats.OpCodeCounts.ZeroRunCount > 0 ||
+                        stats.OpCodeCounts.FloatPatternCount > 0);
             Assert.True(stats.UsedRLE);
             Assert.Equal("RLE", stats.CompressionType);
         }

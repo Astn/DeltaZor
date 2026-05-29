@@ -162,6 +162,11 @@ const MotifAccumulator = struct {
 //   2. TryExtend grows the streak unbounded (no MaxMotifStreak cap), so a long
 //      repeat is emitted as ONE motif instead of being split at 50 units.
 //   3. ShouldEmit uses savings threshold -0.1 (C# ShouldEmit default), not -0.5.
+//
+// FloatRun (0x06): see tryEmitFloatRun below — a float32-lane sparse run probed in the
+// basic-RLE fallback branch (after motif TryStart fails), at 4-aligned positions only,
+// gated to emit ONLY when strictly smaller than byte-RLE. Mirrors C# Encoder.cs
+// TryEmitFloatRun (source of truth). TASK-0361 / EPIC-0045.
 // =====================================================================================
 const motif_density_threshold: f32 = 0.7; // DeltaUtils.MotifDensityThreshold
 const motif_savings_threshold: f32 = -0.1; // Encoder.cs ShouldEmit default savingsThreshold
@@ -277,6 +282,15 @@ fn encodeXorWithMotifsDirect(xor_data: []const u8, buffer: []u8, data_pos: *usiz
             continue;
         }
 
+        // Try a FloatRun (0x06): float32-lane sparse run that motifs (unit cap 8) cannot
+        // reach. Only at a 4-aligned position and only when strictly smaller than byte-RLE.
+        // Mirrors C# Encoder.cs TryEmitFloatRun (source of truth) byte-for-byte.
+        var float_covered: usize = 0;
+        if (tryEmitFloatRun(xor_data, pos, buffer, data_pos, counts, &float_covered)) {
+            pos += float_covered;
+            continue;
+        }
+
         // Fallback to a basic RLE run.
         const is_zero = xor_data[pos] == 0;
         var run_len: usize = 1;
@@ -303,6 +317,79 @@ fn encodeXorWithMotifsDirect(xor_data: []const u8, buffer: []u8, data_pos: *usiz
     if (acc.active and acc.shouldEmit(xor_data)) {
         emitMotif(&acc, xor_data, buffer, data_pos, counts);
     }
+}
+
+// FloatRun 0x06 probe + emit. Mirrors C# Encoder.cs TryEmitFloatRun (SINGLE SOURCE OF
+// TRUTH). Framing:
+//   [0x06][flags=0x00][laneCount:7bit][laneBitmap: ceil(laneCount/8)][packedXor: 4*changedLanes]
+// Treats the XOR stream as float32 lanes (4-byte units aligned to the stream origin).
+// Emits the MAXIMAL run from a 4-aligned pos, gated to emit ONLY when strictly smaller
+// than the equivalent byte-RLE (strict improvement; no speculative emission).
+fn laneChanged(xor_data: []const u8, base_off: usize) bool {
+    return xor_data[base_off] != 0 or xor_data[base_off + 1] != 0 or
+        xor_data[base_off + 2] != 0 or xor_data[base_off + 3] != 0;
+}
+
+fn tryEmitFloatRun(xor_data: []const u8, pos: usize, buffer: []u8, data_pos: *usize, counts: *utils.OpCodeCounts, covered: *usize) bool {
+    covered.* = 0;
+    const lane_size: usize = 4;
+    if ((pos & 3) != 0) return false; // require 4-aligned lane start
+    const avail = xor_data.len - pos;
+    const max_lanes = avail / lane_size;
+    if (max_lanes < 2) return false; // need at least 2 lanes
+    if (!laneChanged(xor_data, pos)) return false; // (a) no leading zero lanes
+
+    // Count changed lanes and find the last changed lane (to trim trailing zeros).
+    var changed_lanes: usize = 0;
+    var last_changed: i64 = -1;
+    var l: usize = 0;
+    while (l < max_lanes) : (l += 1) {
+        if (laneChanged(xor_data, pos + l * lane_size)) {
+            changed_lanes += 1;
+            last_changed = @intCast(l);
+        }
+    }
+
+    const lane_count: usize = @intCast(last_changed + 1); // (b) trim trailing zero lanes
+    if (lane_count < 2) return false;
+    const span = lane_count * lane_size;
+
+    const bitmap_bytes = (lane_count + 7) / 8;
+    const float_size = 1 + 1 + get7BitEncodedSize(lane_count) + bitmap_bytes + lane_size * changed_lanes;
+    const rle_size = estimateRLESizeForSpan(xor_data[pos .. pos + span]);
+    if (float_size >= rle_size) return false; // strict improvement only
+
+    // Emit opcode + flags + laneCount.
+    buffer[data_pos.*] = utils.RLE_FLOAT_RUN;
+    data_pos.* += 1;
+    buffer[data_pos.*] = 0x00; // flags reserved
+    data_pos.* += 1;
+    write7BitEncodedIntDirect(buffer, data_pos, lane_count);
+
+    // Build + write the lane bitmap (LSB-first per byte).
+    const bitmap_start = data_pos.*;
+    @memset(buffer[bitmap_start .. bitmap_start + bitmap_bytes], 0);
+    l = 0;
+    while (l < lane_count) : (l += 1) {
+        if (laneChanged(xor_data, pos + l * lane_size)) {
+            buffer[bitmap_start + (l >> 3)] |= @as(u8, 1) << @intCast(l & 7);
+        }
+    }
+    data_pos.* += bitmap_bytes;
+
+    // Pack the 4 XOR bytes of each changed lane, in lane order.
+    l = 0;
+    while (l < lane_count) : (l += 1) {
+        const base_off = pos + l * lane_size;
+        if (laneChanged(xor_data, base_off)) {
+            @memcpy(buffer[data_pos.* .. data_pos.* + lane_size], xor_data[base_off .. base_off + lane_size]);
+            data_pos.* += lane_size;
+        }
+    }
+
+    counts.float_pattern_count += 1;
+    covered.* = span;
+    return true;
 }
 
 fn createRLEDeltaDirect(old_data: []const u8, new_data: []const u8, buffer: []u8, data_pos: *usize, options: utils.Options, counts: *utils.OpCodeCounts) void {

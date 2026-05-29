@@ -336,6 +336,16 @@ public static class DeltaEncoder
                 continue;
             }
 
+            // Try a FloatRun (0x06): float32-lane sparse run that motifs (unit cap 8)
+            // cannot reach. Only at a 4-aligned position and only when strictly smaller
+            // than the equivalent byte-RLE. See Encoder.cs source-of-truth (mirrored by
+            // Zig encoder.zig tryEmitFloatRun).
+            if (TryEmitFloatRun(xorData, pos, writer, tempBuffer, ref counts, out int floatCovered))
+            {
+                pos += floatCovered;
+                continue;
+            }
+
             // Fallback to RLE run
             bool isZero = xorData[pos] == 0;
             int runLen = 1;
@@ -421,6 +431,92 @@ public static class DeltaEncoder
             counts.VaryingMotifCount++;
             counts.AverageMaskDensity = newAvg;
         }
+    }
+
+    private static bool LaneChanged(ReadOnlySpan<byte> xorData, int baseOff) =>
+        xorData[baseOff] != 0 || xorData[baseOff + 1] != 0 ||
+        xorData[baseOff + 2] != 0 || xorData[baseOff + 3] != 0;
+
+    // FloatRun 0x06 probe + emit. SINGLE SOURCE OF TRUTH for the float-lane opcode;
+    // mirrored byte-for-byte by Zig encoder.zig tryEmitFloatRun. Framing:
+    //   [0x06][flags=0x00][laneCount:7bit][laneBitmap: ceil(laneCount/8)][packedXor: 4*changedLanes]
+    // Treats the XOR stream as float32 lanes (4-byte units aligned to the stream origin).
+    // Targets SPARSE/STRIDED changed lanes that motifs (unit cap 8) cannot reach. To avoid
+    // swallowing a downstream motif-able block, the run:
+    //   (a) requires the FIRST lane at pos to be changed (no leading zero lanes — those are
+    //       left for the natural ZeroRun, which re-probes FloatRun at the next changed lane);
+    //   (b) trims trailing zero lanes (laneCount = lastChangedLane + 1);
+    // and is gated to emit ONLY when strictly smaller than byte-RLE over the trimmed span
+    // (strict improvement; no speculative emission). A solid contiguous changed block fails
+    // the gate (byte-RLE/motif is cheaper) and is left to those opcodes.
+    private static bool TryEmitFloatRun(ReadOnlySpan<byte> xorData, int pos, IBufferWriter<byte> writer,
+        Span<byte> tempBuffer, ref DeltaZor.OpCodeCounts counts, out int covered)
+    {
+        covered = 0;
+        const int LaneSize = 4;
+        if ((pos & 3) != 0) return false; // require 4-aligned lane start
+        int avail = xorData.Length - pos;
+        int maxLanes = avail / LaneSize;
+        if (maxLanes < 2) return false; // need at least 2 lanes
+        if (!LaneChanged(xorData, pos)) return false; // (a) no leading zero lanes
+
+        // Count changed lanes and find the last changed lane (to trim trailing zeros).
+        int changedLanes = 0;
+        int lastChanged = -1;
+        for (int l = 0; l < maxLanes; l++)
+        {
+            if (LaneChanged(xorData, pos + l * LaneSize))
+            {
+                changedLanes++;
+                lastChanged = l;
+            }
+        }
+
+        int laneCount = lastChanged + 1; // (b) trim trailing zero lanes
+        if (laneCount < 2) return false;
+        int span = laneCount * LaneSize;
+
+        int bitmapBytes = (laneCount + 7) / 8;
+        int floatSize = 1 + 1 + DeltaUtils.Get7BitEncodedSize(laneCount) + bitmapBytes + LaneSize * changedLanes;
+        int rleSize = DeltaUtils.EstimateRLESizeForSpan(xorData.Slice(pos, span));
+        if (floatSize >= rleSize) return false; // strict improvement only
+
+        // Emit opcode + flags + laneCount.
+        Span<byte> oneByteSpan = stackalloc byte[1];
+        oneByteSpan[0] = DeltaUtils.RLE_FloatRun;
+        writer.Write(oneByteSpan);
+        oneByteSpan[0] = 0x00; // flags reserved
+        writer.Write(oneByteSpan);
+        DeltaUtils.Write7BitEncodedInt(writer, laneCount);
+
+        // Build and write the lane bitmap (LSB-first per byte).
+        Span<byte> bitmap = bitmapBytes <= 512 ? stackalloc byte[bitmapBytes] : new byte[bitmapBytes];
+        bitmap.Clear();
+        for (int l = 0; l < laneCount; l++)
+        {
+            if (LaneChanged(xorData, pos + l * LaneSize))
+                bitmap[l >> 3] |= (byte)(1 << (l & 7));
+        }
+        writer.Write(bitmap);
+
+        // Pack the 4 XOR bytes of each changed lane, in lane order.
+        int dataLen = LaneSize * changedLanes;
+        Span<byte> packed = dataLen <= tempBuffer.Length ? tempBuffer[..dataLen] : new byte[dataLen];
+        int cursor = 0;
+        for (int l = 0; l < laneCount; l++)
+        {
+            int baseOff = pos + l * LaneSize;
+            if (LaneChanged(xorData, baseOff))
+            {
+                xorData.Slice(baseOff, LaneSize).CopyTo(packed.Slice(cursor, LaneSize));
+                cursor += LaneSize;
+            }
+        }
+        writer.Write(packed);
+
+        counts.FloatPatternCount++;
+        covered = span;
+        return true;
     }
 
     public static DeltaZor.OpCodeCounts CreateRLEDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData,

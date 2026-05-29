@@ -214,6 +214,8 @@ public class Program
             // TASK-0405: near-threshold boundary vectors bracketing newLen×1.5 FullReplace fallback
             new Test044_ThresholdBoundary_BelowRLE(),
             new Test045_ThresholdBoundary_AboveFullReplace(),
+            // TASK-0361: FloatRun 0x06 — strided float32-lane sparse run (motif unit > 8 gap)
+            new Test046_FloatRun_Stride12_f32(),
         };
 
         var manifest = new List<ManifestEntry>();
