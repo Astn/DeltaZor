@@ -67,7 +67,14 @@ pub fn write7BitEncodedIntDirect(buffer: []u8, pos: *usize, value: usize) void {
 }
 
 pub const Options = struct {
-    compression_threshold: f64 = 1.5,
+    // Auto-mode best-of selection knob (TASK-0366). The top-level mode is chosen by comparing
+    // the RLE-delta stream's actual data length against new_data.len × compression_threshold,
+    // keeping RLE iff rle_data_len <= new_data.len × threshold. At the default 1.0 this is
+    // genuine best-of (pick the smaller candidate) with a deterministic "lowest mode-id wins"
+    // tie-break: on an exact size tie the strict `>` in createDeltaWithStats keeps RLE (0x00)
+    // over FullReplace (0x01). MUST equal the C# DeltaOptions.CompressionThreshold default so
+    // both languages emit the SAME mode for the same input (byte-parity crux). (Mirror of C#.)
+    compression_threshold: f64 = 1.0,
     enable_checksum: bool = false,
     max_stack_buffer_size: usize = 4096,
     use_simd: bool = true,

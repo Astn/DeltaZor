@@ -13,12 +13,17 @@ using DZ; // Assuming DeltaZor namespace
 
 public class DeltaFileValidationTests
 {
+    // Mirror the vector-generation options (DZ.TestGen.Program uses `new DeltaOptions()` defaults),
+    // so the validated deltas reproduce the regenerated .delta.bin byte-for-byte. The default
+    // CompressionThreshold is now 1.0 (auto-mode best-of, TASK-0366) — the validation MUST use the
+    // same threshold the generator used, otherwise near-threshold vectors (e.g. Test044, RLE 767 >
+    // raw 512) would generate FullReplace but validate as RLE and spuriously mismatch.
     private static readonly DeltaZor.DeltaOptions DefaultOptions = new DeltaZor.DeltaOptions
     {
         UseSIMD = true,
         EnableMotifDetection = true,
         EnableChecksum = false,
-        CompressionThreshold = 1.5
+        CompressionThreshold = 1.0
     };
 
     private static string ComputeSha256(byte[] data)

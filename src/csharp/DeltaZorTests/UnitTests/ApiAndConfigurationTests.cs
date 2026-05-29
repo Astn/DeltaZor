@@ -28,7 +28,12 @@ namespace DZ.Tests.UnitTests
             // Arrange
             var oldData = new byte[] { 1, 2, 3, 4, 5 };
             var newData = new byte[] { 1, 9, 3, 4, 5 };
-            var smallBuffer = new byte[10]; // Too small
+            // Smaller than the 5-byte header alone, so it cannot fit ANY mode's output. (Was 10:
+            // under auto-mode best-of (TASK-0366) this 5-byte input now correctly picks the smaller
+            // FullReplace candidate — 5 header + 5 raw = 10 bytes — which would FIT a 10-byte
+            // buffer, so 10 no longer exercises the too-small path. 4 < header is unconditionally
+            // too small.)
+            var smallBuffer = new byte[4]; // Too small for even the header
 
             // Act
             var success = DeltaZor.CreateDelta(oldData.AsSpan(), newData.AsSpan(), smallBuffer.AsSpan(), out int requiredSize, out var stats);

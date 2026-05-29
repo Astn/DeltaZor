@@ -45,12 +45,25 @@ public static class DeltaZor
     public class DeltaOptions
     {
         /// <summary>
-        /// RLE-to-FullReplace fallback threshold: if the RLE-encoded data exceeds
-        /// newData.Length × CompressionThreshold, fall back to FullReplace.
-        /// Default is 1.5 (RLE must be within 150% of raw size).
-        /// Set to 2.0+ to force RLE in tests that verify RLE/motif behavior.
+        /// Auto-mode best-of selection knob (TASK-0366). The top-level encoding is chosen by
+        /// comparing the two candidate top-level modes' ACTUAL produced data sizes — the
+        /// RLE-delta-with-opcodes stream (compression_type 0x00, which itself already best-of's
+        /// the 0x00-0x0B opcodes/arithmetic modes internally via their strict-improvement gates)
+        /// and the raw FullReplace stream (0x01, == newData.Length) — and keeping RLE iff
+        ///   rleDataLength &lt;= newData.Length × CompressionThreshold.
+        ///
+        /// At the default of 1.0 this is GENUINE auto-mode best-of: pick the smaller of the two
+        /// candidates, with a DETERMINISTIC tie-break of "lowest mode-id wins" (RLE 0x00 is kept
+        /// on an exact size tie). The selection is byte-identical in C# (authoritative) and Zig
+        /// (mirrored: encoder.zig createDeltaWithStats uses the same strict `&gt;` compare against
+        /// new_data.len × compression_threshold), so both languages always emit the SAME
+        /// top-level mode for the same input — no parity break from divergent selection.
+        ///
+        /// Values &gt; 1.0 deliberately KEEP an RLE delta that is larger than raw (used by
+        /// motif-internals unit tests, e.g. 2.0, to force the RLE path); values &lt; 1.0 force
+        /// FullReplace earlier. Best-of optimality holds exactly at 1.0.
         /// </summary>
-        public double CompressionThreshold { get; set; } = 1.5;
+        public double CompressionThreshold { get; set; } = 1.0;
 
         /// <summary>
         /// Whether to include checksum for corruption detection.
@@ -217,10 +230,18 @@ public static class DeltaZor
         }
 
         var dataSpan = writer.WrittenSpan;
-        // Fallback: If RLE is significantly larger than full replace, switch to full
+        // Auto-mode best-of (TASK-0366): the two candidate top-level modes are the RLE-delta
+        // stream just produced (dataSpan.Length bytes) and a raw FullReplace (newData.Length
+        // bytes). Keep RLE iff it is no larger than FullReplace × CompressionThreshold; at the
+        // default threshold 1.0 this picks the genuinely SMALLER candidate, with a deterministic
+        // tie-break of "lowest mode-id wins" — on an exact size tie the strict `>` keeps RLE
+        // (mode 0x00) over FullReplace (mode 0x01). The header (5 bytes) and optional checksum
+        // are identical for both modes, so comparing the data sizes is the exact total-size
+        // comparison. Mirrored byte-for-byte by Zig encoder.zig createDeltaWithStats so both
+        // languages always select the SAME mode (no parity break from divergent selection).
         if (usedRLE && dataSpan.Length > newData.Length * options.CompressionThreshold)
         {
-            // Discard RLE, write full replace
+            // FullReplace is the smaller (or tie-broken) candidate — discard RLE, emit raw.
             writer.Clear(); // Reset buffer
             writer.Write(newData);
             dataSpan = writer.WrittenSpan;
