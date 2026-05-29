@@ -216,6 +216,8 @@ public class Program
             new Test045_ThresholdBoundary_AboveFullReplace(),
             // TASK-0361: FloatRun 0x06 — strided float32-lane sparse run (motif unit > 8 gap)
             new Test046_FloatRun_Stride12_f32(),
+            // TASK-0361 (codex REJECT-B): FloatRun must YIELD to a mid-span motif (no swallow)
+            new Test047_FloatRun_YieldsToMidSpanMotif(),
         };
 
         var manifest = new List<ManifestEntry>();

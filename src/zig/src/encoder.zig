@@ -323,11 +323,63 @@ fn encodeXorWithMotifsDirect(xor_data: []const u8, buffer: []u8, data_pos: *usiz
 // TRUTH). Framing:
 //   [0x06][flags=0x00][laneCount:7bit][laneBitmap: ceil(laneCount/8)][packedXor: 4*changedLanes]
 // Treats the XOR stream as float32 lanes (4-byte units aligned to the stream origin).
-// Emits the MAXIMAL run from a 4-aligned pos, gated to emit ONLY when strictly smaller
-// than the equivalent byte-RLE (strict improvement; no speculative emission).
+// Requires the first lane changed, trims trailing zero lanes, and is MOTIF-AWARE: emits ONLY
+// when strictly smaller than BOTH byte-RLE AND the actual motif/RLE encoder cost over the
+// span (estimateMotifRleSizeForSpan). A mid-span motif-able block is priced cheaply by the
+// motif estimate, so the gate rejects it (no regression vs the existing pipeline).
 fn laneChanged(xor_data: []const u8, base_off: usize) bool {
     return xor_data[base_off] != 0 or xor_data[base_off + 1] != 0 or
         xor_data[base_off + 2] != 0 or xor_data[base_off + 3] != 0;
+}
+
+// Emitted byte size of a motif (mirrors emitMotif framing). Mirrors C# Encoder.cs
+// MotifEmitSize (source of truth) for the FloatRun motif-alternative gate.
+fn motifEmitSize(acc: *const MotifAccumulator) usize {
+    var header_size: usize = 1 + 1 + get7BitEncodedSize(acc.streak) + get7BitEncodedSize(acc.unit_size);
+    const data_len = acc.changed_count * (if (acc.is_uniform) @as(usize, 1) else acc.streak);
+    if (acc.is_full) return header_size + data_len;
+    header_size += get7BitEncodedSize(@as(usize, @intCast(acc.mask)));
+    return header_size + data_len;
+}
+
+// Estimates the byte cost the existing motif + byte-RLE pipeline would produce for a span of
+// the XOR stream, WITHOUT the FloatRun probe (no recursion). Pure size counter — never writes.
+// Mirrors C# Encoder.cs EstimateMotifRleSizeForSpan (source of truth). FloatRun emits only
+// when strictly smaller than this, so a mid-span motif-able block blocks FloatRun.
+// (TASK-0361 codex REJECT B fix: gate vs the motif/RLE alternative, not just byte-RLE.)
+fn estimateMotifRleSizeForSpan(span: []const u8) usize {
+    var size: usize = 0;
+    var pos: usize = 0;
+    var acc = MotifAccumulator{};
+    acc.reset();
+
+    while (pos < span.len) {
+        if (acc.active and acc.tryExtend(span)) {
+            pos += acc.unit_size;
+            continue;
+        }
+        if (acc.active and acc.shouldEmit(span)) {
+            size += motifEmitSize(&acc);
+            pos = acc.start_pos + acc.coveredLength();
+            acc.reset();
+            continue;
+        }
+        if (acc.active) acc.reset();
+        if (acc.tryStart(span, pos)) {
+            pos += acc.unit_size;
+            continue;
+        }
+        // Basic RLE run fallback (matches encodeXorWithMotifsDirect).
+        const is_zero = span[pos] == 0;
+        var run_len: usize = 1;
+        while (pos + run_len < span.len and (span[pos + run_len] == 0) == is_zero) run_len += 1;
+        size += 1 + get7BitEncodedSize(run_len) + (if (is_zero) @as(usize, 0) else run_len);
+        pos += run_len;
+    }
+    if (acc.active and acc.shouldEmit(span)) {
+        size += motifEmitSize(&acc);
+    }
+    return size;
 }
 
 fn tryEmitFloatRun(xor_data: []const u8, pos: usize, buffer: []u8, data_pos: *usize, counts: *utils.OpCodeCounts, covered: *usize) bool {
@@ -356,8 +408,13 @@ fn tryEmitFloatRun(xor_data: []const u8, pos: usize, buffer: []u8, data_pos: *us
 
     const bitmap_bytes = (lane_count + 7) / 8;
     const float_size = 1 + 1 + get7BitEncodedSize(lane_count) + bitmap_bytes + lane_size * changed_lanes;
-    const rle_size = estimateRLESizeForSpan(xor_data[pos .. pos + span]);
-    if (float_size >= rle_size) return false; // strict improvement only
+    const span_slice = xor_data[pos .. pos + span];
+    const rle_size = estimateRLESizeForSpan(span_slice);
+    if (float_size >= rle_size) return false; // strict improvement vs byte-RLE
+    // Motif-aware gate: also beat the actual motif/RLE encoder cost over the span, so a
+    // mid-span motif-able block cannot be swallowed at a net regression.
+    const motif_rle_size = estimateMotifRleSizeForSpan(span_slice);
+    if (float_size >= motif_rle_size) return false; // strict improvement vs motif/RLE too
 
     // Emit opcode + flags + laneCount.
     buffer[data_pos.*] = utils.RLE_FLOAT_RUN;

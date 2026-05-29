@@ -437,6 +437,70 @@ public static class DeltaEncoder
         xorData[baseOff] != 0 || xorData[baseOff + 1] != 0 ||
         xorData[baseOff + 2] != 0 || xorData[baseOff + 3] != 0;
 
+    // Estimates the byte cost the existing motif + byte-RLE pipeline would produce for a span
+    // of the XOR stream, WITHOUT the FloatRun probe (to avoid recursion and to measure the
+    // genuine alternative FloatRun must beat). This is the live MotifAccumulator state machine
+    // (TryExtend/ShouldEmit/EmitMotif sizing + ZeroRun/NonZeroRun fallback) run as a pure
+    // size counter — it never writes bytes. FloatRun emits ONLY when strictly smaller than
+    // this, so a mid-span motif-able block (which this counter prices cheaply) blocks the
+    // FloatRun. Mirrored byte-for-byte by Zig encoder.zig estimateMotifRleSizeForSpan.
+    // (TASK-0361 codex REJECT B fix: gate vs the motif/RLE alternative, not just byte-RLE.)
+    private static int EstimateMotifRleSizeForSpan(ReadOnlySpan<byte> span)
+    {
+        int size = 0;
+        int pos = 0;
+        MotifAccumulator acc = new();
+        acc.Reset();
+
+        while (pos < span.Length)
+        {
+            if (acc.Active && acc.TryExtend(span, pos))
+            {
+                pos += acc.UnitSize;
+                continue;
+            }
+
+            if (acc.Active && acc.ShouldEmit(span))
+            {
+                size += MotifEmitSize(acc);
+                pos = acc.StartPos + acc.CoveredLength;
+                acc.Reset();
+                continue;
+            }
+
+            if (acc.Active)
+                acc.Reset();
+
+            if (acc.TryStart(span, pos))
+            {
+                pos += acc.UnitSize;
+                continue;
+            }
+
+            // Basic RLE run fallback (matches EncodeXorWithMotifs).
+            bool isZero = span[pos] == 0;
+            int runLen = 1;
+            while (pos + runLen < span.Length && (span[pos + runLen] == 0) == isZero) runLen++;
+            size += 1 + DeltaUtils.Get7BitEncodedSize(runLen) + (isZero ? 0 : runLen);
+            pos += runLen;
+        }
+
+        // Trailing motif (matches EncodeXorWithMotifs end-of-loop emit).
+        if (acc.Active && acc.ShouldEmit(span))
+            size += MotifEmitSize(acc);
+
+        return size;
+    }
+
+    // Emitted byte size of a motif (mirrors EmitMotif framing). Source of truth for the
+    // FloatRun motif-alternative gate; mirrored by Zig encoder.zig motifEmitSize.
+    private static int MotifEmitSize(in MotifAccumulator acc)
+    {
+        int headerSize = 1 + 1 + DeltaUtils.Get7BitEncodedSize(acc.Streak) + DeltaUtils.Get7BitEncodedSize(acc.UnitSize);
+        int dataLen = acc.ChangedCount * (acc.IsUniform ? 1 : acc.Streak);
+        return acc.IsFull ? headerSize + dataLen : headerSize + DeltaUtils.Get7BitEncodedSize((int)acc.Mask) + dataLen;
+    }
+
     // FloatRun 0x06 probe + emit. SINGLE SOURCE OF TRUTH for the float-lane opcode;
     // mirrored byte-for-byte by Zig encoder.zig tryEmitFloatRun. Framing:
     //   [0x06][flags=0x00][laneCount:7bit][laneBitmap: ceil(laneCount/8)][packedXor: 4*changedLanes]
@@ -446,9 +510,13 @@ public static class DeltaEncoder
     //   (a) requires the FIRST lane at pos to be changed (no leading zero lanes — those are
     //       left for the natural ZeroRun, which re-probes FloatRun at the next changed lane);
     //   (b) trims trailing zero lanes (laneCount = lastChangedLane + 1);
-    // and is gated to emit ONLY when strictly smaller than byte-RLE over the trimmed span
-    // (strict improvement; no speculative emission). A solid contiguous changed block fails
-    // the gate (byte-RLE/motif is cheaper) and is left to those opcodes.
+    // and is MOTIF-AWARE: it emits ONLY when floatSize is strictly smaller than BOTH byte-RLE
+    // AND the actual motif/RLE encoder cost over the same span (EstimateMotifRleSizeForSpan).
+    // A mid-span motif-able block (e.g. a long Uniform repeat after a changed first lane) is
+    // priced cheaply by the motif estimate, so the gate rejects and the region is left to the
+    // motif/RLE path — FloatRun never regresses size vs the existing pipeline. A genuine
+    // strided/sparse float pattern that motifs cannot capture still wins (Test046).
+    // (TASK-0361 codex REJECT B fix: gate vs the motif alternative, not just byte-RLE alone.)
     private static bool TryEmitFloatRun(ReadOnlySpan<byte> xorData, int pos, IBufferWriter<byte> writer,
         Span<byte> tempBuffer, ref DeltaZor.OpCodeCounts counts, out int covered)
     {
@@ -478,8 +546,13 @@ public static class DeltaEncoder
 
         int bitmapBytes = (laneCount + 7) / 8;
         int floatSize = 1 + 1 + DeltaUtils.Get7BitEncodedSize(laneCount) + bitmapBytes + LaneSize * changedLanes;
-        int rleSize = DeltaUtils.EstimateRLESizeForSpan(xorData.Slice(pos, span));
-        if (floatSize >= rleSize) return false; // strict improvement only
+        ReadOnlySpan<byte> spanSlice = xorData.Slice(pos, span);
+        int rleSize = DeltaUtils.EstimateRLESizeForSpan(spanSlice);
+        if (floatSize >= rleSize) return false; // strict improvement vs byte-RLE
+        // Motif-aware gate: also beat the actual motif/RLE encoder cost over the span, so a
+        // mid-span motif-able block cannot be swallowed at a net regression.
+        int motifRleSize = EstimateMotifRleSizeForSpan(spanSlice);
+        if (floatSize >= motifRleSize) return false; // strict improvement vs motif/RLE too
 
         // Emit opcode + flags + laneCount.
         Span<byte> oneByteSpan = stackalloc byte[1];

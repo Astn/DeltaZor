@@ -365,3 +365,75 @@ the 0x06 decoder reconstructs encoder-produced streams correctly. However, the s
 is still not sound as a strict-improvement opcode: a changed first lane can cause maximal
 FloatRun to swallow a later motif-able region and regress size badly. This violates the
 TASK-0361/EPIC-0045 requirement that FloatRun be a strict improvement or a no-op.
+
+## Remediation (codex REJECT B) — make the FloatRun gate motif-aware
+
+- **Date:** 2026-05-29 · **Impl-kind:** claude (opus, no-sandbox dev remediation lane)
+- **Base:** `be41783` (impl `e5c8867` + codex audit appendix). Branch `task-0361-floatrun-0x06`.
+
+### R.1 Reproduction (no-papering — proved real BEFORE fixing)
+
+Built codex's adversarial XOR shape as a 416-byte vector (all-zero base ⇒ XOR == next):
+byte 0 = `0x01` (first lane changed; motif `TryStart` fails at byte 0), bytes 4–15 = three
+zero lanes, bytes 16–415 = 100× `AA 00 00 00` (a Uniform motif, unit 4). Ran it through the
+**current** encoder (`be41783`):
+
+```
+deltaSize = 425   FloatPatternCount = 1
+payload:  06 00 68 ...   (FloatRun, laneCount 0x68 = 104 — swallowed the whole region)
+```
+
+The optimal encode is `NonZeroRun(1) + ZeroRun(15) + UniformMotif(100)` = **16 bytes**.
+Current = **425 bytes** → a **409-byte regression**, exactly codex's mechanism: the maximal
+lane-run scans to the last changed lane and swallows the mid-span Uniform motif because motif
+`TryStart` failed only at the *original* `pos`. Finding CONFIRMED reproducible.
+
+### R.2 Fix — gate vs the motif/RLE alternative (approach b), not approach a
+
+Approach (a) (cap the run before the first byte where `TryStart` succeeds) was implemented
+first and **REJECTED in self-test**: it regressed the legitimate Test046 win 1131 → 1138 B.
+Root cause — `TryStart` succeeding ≠ a motif is a net win. In Test046 (stride-12 float,
+per-lane-varying mantissas) a *varying* masked motif `TryStart`s mid-span but does not extend
+into a win; yielding to it fragmented the FloatRun and cost 7 bytes more. Capping on "motif
+*could* start" is unsound.
+
+Adopted approach **(b)**: FloatRun emits iff `floatSize < min(rleSize, motifRleSize)` where
+`motifRleSize = EstimateMotifRleSizeForSpan(span)` — a new pure size counter that runs the
+**actual live motif + byte-RLE state machine** (TryExtend / ShouldEmit / EmitMotif sizing +
+ZeroRun/NonZeroRun fallback) over the candidate span *without* the FloatRun probe (no
+recursion, never writes bytes). This prices the genuine alternative: the codex Uniform block
+costs ~6 B (gate rejects FloatRun → motif path wins, 16 B total); Test046's short varying
+motifs cost MORE than the unified FloatRun (gate accepts → FloatRun still wins, 1131 B). So
+FloatRun is now a strict improvement over **every** alternative the pipeline would produce
+for that span, or a no-op. C# `EstimateMotifRleSizeForSpan` + `MotifEmitSize` are the source
+of truth; Zig `estimateMotifRleSizeForSpan` + `motifEmitSize` mirror them byte-for-byte.
+
+### R.3 New permanent corpus vector
+
+`Test047_FloatRun_YieldsToMidSpanMotif` (TestGen, id 47, registered in Program.cs) encodes
+the R.1 reproduction. `ExpectedDeltaSize = 16`; it must emit NonZeroRun+ZeroRun+UniformMotif
+(FloatPatternCount 0) and be byte-identical C#↔Zig + round-trip exact — locking the
+regression out permanently.
+
+### R.4 Evidence (real runs, both toolchains, --no-restore)
+
+- **Repro before/after:** 425 B (FloatRun swallow) → **16 B** (FloatRun yields, Uniform motif).
+- **C#** `dotnet test … --no-restore -m:1`: **Failed 0, Passed 101, Skipped 10** (was 100;
+  +1 = Test047).
+- **Zig** `zig build test` (fresh `.zig-cache`/testdata), zig 0.15.1: **EXIT=0, 0 Error(s)**;
+  46 create-delta vectors byte-identical C#↔Zig (45 prior + Test047; test008 excluded as at
+  baseline), round-trip + apply + allocation-free all pass.
+- **Test046 UNCHANGED:** still FloatRun, `06 00 FE 05` (laneCount 766), **1131 B**,
+  byte-identical C#↔Zig (the laneCount/size match the codex-audited baseline exactly).
+- **Test047:** `01 01 01 | 00 0F | 04 80 64 04 01 AA` = 16 B, FloatPatternCount 0, both langs.
+- test013 (streaming 120000 B) unchanged at 80173 B; test015 unchanged at 21 B.
+
+### R.5 Scope
+
+`git diff --stat HEAD`: `Encoder.cs` (gate + 2 helpers), `encoder.zig` (mirror), `Program.cs`
+(+Test047 registration), new `Test047...cs`. No decoder/utils/0x07/0x08 changes. Decode path
+untouched (the fix is encoder-side selection only; the wire format is identical).
+
+**Confidence:** high — regression proved with a concrete vector, root-caused (TryStart ≠
+net-win), fixed at the gate (strict-improvement vs the real motif/RLE alternative), both
+toolchains green on real runs, byte-parity + round-trip verified, Test046 byte-identical.
