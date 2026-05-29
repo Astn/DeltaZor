@@ -171,3 +171,124 @@ EPIC-0046 capstone: the encoder now performs genuine auto-mode best-of at the to
 RLE-delta vs FullReplace, deterministic lowest-mode-id tie-break), byte-parity-confirmed C#↔Zig
 across all 56 vectors + round-trip, with the value gap (best-of beating the 1.5 heuristic) proven and
 `AutoModeSelection` un-skipped and passing. GO.
+
+## Cross-kind audit (codex on claude impl)
+
+Date: 2026-05-29. Branch/HEAD verified before audit: `task-0366-auto-mode-best-of` at
+`3c058d2`; worktree was clean. Read-only audit except this append. No graph writes performed.
+
+### A. Threshold 1.0 is genuine top-level best-of
+
+APPROVED. C# `DeltaOptions.CompressionThreshold` now defaults to `1.0`
+(`src/csharp/DeltaZor/DeltaZor.cs`), and Zig `Options.compression_threshold` now defaults to `1.0`
+(`src/zig/src/utils.zig`). The existing compare is unchanged in C#:
+
+```csharp
+if (usedRLE && dataSpan.Length > newData.Length * options.CompressionThreshold)
+```
+
+and mirrored in Zig:
+
+```zig
+if (used_rle and @as(f64, @floatFromInt(rle_data_len)) >
+    @as(f64, @floatFromInt(new_data.len)) * options.compression_threshold)
+```
+
+At threshold `1.0`, the predicate falls back only when `rleDataLen > rawLen`, so RLE is emitted iff
+`rleDataLen <= rawLen`. The strict `>` gives the required deterministic tie-break: exact equality
+keeps RLE (`0x00`, the lower mode id) over FullReplace (`0x01`). Header and checksum overhead are
+mode-identical: both modes use the same 5-byte header (`output_length` + `compression_type`) and the
+same optional 4-byte checksum over `newData`, so data-size comparison is exactly total-size
+comparison. No new selection path was added; the implementation is the pre-existing mirrored compare
+with the default changed from `1.5` to `1.0`.
+
+### B. Value gap and AutoModeSelection coverage
+
+APPROVED. The value gap is real: the execution log's probed 4000-byte aperiodic isolated-change
+input produced RLE data `4133` for raw `4000` (`~1.033x`). The old `1.5` default would keep that
+larger RLE delta, while the `1.0` best-of default correctly emits FullReplace.
+
+`ArithmeticCompressionTests.AutoModeSelection_ChoosesBestCompressionMode` is un-skipped and covers
+the required three cases:
+
+- RLE-bloat case: asserts `rleA > raw`, emitted mode `0x01`, stats `FullReplace`, emitted length
+  `5 + raw`, emitted length smaller than the would-have-been RLE total, and round-trip.
+- Sparse case: asserts `rleB < raw`, emitted mode `0x00`, stats `RLE`, emitted length `5 + rleB`,
+  and round-trip.
+- Tie-boundary case: sets `CompressionThreshold = rleData / raw` so the strict compare lands exactly
+  on equality and asserts mode `0x00` / stats `RLE`. This proves the tie direction. Minor
+  non-blocking test-strength note: this case does not separately assert the emitted length, but the
+  mode assertion at the exact boundary is enough for the tie-break contract.
+
+I re-ran the focused test locally with the mandated no-restore/no-build path:
+
+```text
+dotnet test src/csharp/DeltaZorTests/DeltaZorTests.csproj --no-restore --no-build -m:1 --filter FullyQualifiedName~AutoModeSelection_ChoosesBestCompressionMode
+Passed: 1, Failed: 0, Skipped: 0
+```
+
+### C. Global threshold change and vector regression risk
+
+APPROVED. The threshold default is global, but the regenerated corpus is consistent with best-of and
+round-trips. I inspected the current generated manifest/deltas after the C# vector validation path:
+56 manifest entries, mode counts `54` RLE and `2` FullReplace. The two FullReplace vectors are:
+
+- Test001 `Random 1KB`: raw payload `1024`, emitted `0x01`, delta `1029` (`5 + raw`).
+- Test054 `Arithmetic YieldsToXor`: raw payload `2048`, emitted `0x01`, delta `2053` (`5 + raw`).
+
+Both are dense-random/yield-to-XOR shapes where RLE must carry the raw XOR bytes plus opcode/count
+overhead, so the FullReplace flip is a size improvement, not a regression. The old TASK-0405
+boundary pair no longer drives the threshold decision after the stronger opcode pipeline:
+Test044 emits RLE payload `510 < 512`; Test045 emits RLE payload `502 < 512`. They correctly remain
+RLE under best-of.
+
+Local C# vector validation also passed under the no-restore/no-build constraint:
+
+```text
+dotnet test src/csharp/DeltaZorTests/DeltaZorTests.csproj --no-restore --no-build -m:1 --filter FullyQualifiedName~ValidateTestGenSamples
+Passed: 55, Failed: 0, Skipped: 0
+```
+
+The xUnit theory filters to 55 valid manifest rows; the manifest contains 56 entries, with the
+existing composite Test008 marked invalid for that theory path. For cross-language parity, I rely on
+the orchestrator-confirmed Zig 0.15.1 result: `zig build test` exit `0`, all 56 vectors
+byte-identical C#<->Zig, same mode distribution `54` RLE / `2` FullReplace, and round-trip.
+
+### D. Scope, buffer fix, and graph/no-papering
+
+APPROVED. The code diff is bounded to:
+
+- C# default threshold `1.5 -> 1.0` plus explanatory comments.
+- Zig default threshold `1.5 -> 1.0` plus explanatory comments.
+- `AutoModeSelection` un-skip and implementation.
+- `ApiAndConfigurationTests.BufferManagement_SpanAPI_BufferTooSmall` buffer `10 -> 4`.
+- `TestGenTests` validation threshold `1.5 -> 1.0`.
+- This execution log.
+
+No C# or Zig encode/decode logic changed apart from the default value and comments; `encoder.zig`,
+`Encoder.cs`, and decoder code are untouched by the commit. The buffer-size test fix is legitimate:
+for the 5-byte input, best-of now emits FullReplace of exactly `5 header + 5 raw = 10`, so a
+10-byte buffer is no longer too small. A 4-byte buffer is below the header size and remains
+unconditionally too small, so the test still exercises the intended API behavior.
+
+Graph note: the committed execution log did not include a graph-update note. I did a read-only live
+graph check and found `TASK-0366` in `review` with only canonical outgoing relationship types:
+`IMPLEMENTS` to `DEC-TASK-0366-bestof-threshold-1.0`, `RELATES_TO` to `TASK-0529`,
+`REFERENCES_COMMIT`, and `IN_PROJECT`. No invented edge type was present. I did not update the graph.
+
+### E. Independent rerun and toolchain handling
+
+APPROVED. I did not run Zig locally and did not use Zig 0.16 for this audit. Per the audit brief, the
+authoritative Zig result is the orchestrator's clean Zig 0.15.1 run: `zig build test` exit `0`, 56
+vectors byte-identical C#<->Zig with same mode and round-trip. I performed only no-restore/no-build
+C# smoke checks, both passing as recorded above. The orchestrator's full C# result remains the full
+suite authority: `117 passed / 0 failed / 4 skipped`.
+
+### VERDICT
+
+APPROVED. TASK-0366 is sound: auto-mode top-level selection is genuine best-of at the default
+threshold `1.0`, C# and Zig use the same deterministic strict-`>` selection predicate with RLE
+winning exact ties, header/checksum overhead is mode-identical, the value gap is proven, the global
+vector change improves dense random/yield-to-XOR cases rather than regressing them, and the
+orchestrator-confirmed Zig 0.15.1 parity run is clean. EPIC-0046 is COMPLETE; orchestrator can merge
+`task-0366-auto-mode-best-of` to `master` and close TASK-0366.
