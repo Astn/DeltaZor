@@ -211,6 +211,9 @@ public class Program
                 tags: new[] { "udp", "512b", "dense", "xor", "vertical" },
                 descriptionTemplate: "{size}B packet: {change}/{total}ths {op}-flipped dense vertical"
             ),
+            // TASK-0405: near-threshold boundary vectors bracketing newLen×1.5 FullReplace fallback
+            new Test044_ThresholdBoundary_BelowRLE(),
+            new Test045_ThresholdBoundary_AboveFullReplace(),
         };
 
         var manifest = new List<ManifestEntry>();
