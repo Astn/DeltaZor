@@ -94,3 +94,94 @@ which had claimed parity while it was stale-corpus/skip-masked). build.zig regen
 
 Zig 0.15.1 binary (for codex audit):
 `C:/Users/austi/AppData/Local/Temp/zig0151/zig-x86_64-windows-0.15.1/zig.exe`
+
+## Cross-kind audit (codex on claude impl)
+
+STOP check: repository HEAD is `9d67683`; `src/zig/src/encoder.zig` had no
+uncommitted changes before this audit append.
+
+### A. Faithfulness of the Zig MotifAccumulator to C# live encoder
+
+APPROVED. I read `src/csharp/DeltaZor/Encoder.cs` and
+`src/zig/src/encoder.zig` side by side. The live C# path is
+`CreateRLEDelta` -> `EncodeXorWithMotifs` -> `MotifAccumulator`; C#'s
+`FindMotifCandidate` is present but not called by `CreateRLEDelta`.
+
+The Zig accumulator is semantically faithful to that live C# path:
+
+- `tryStart` matches C# `TryStart`: global `pos + 8 <= len` gate, probes unit
+  sizes `2..8` ascending, skips all-zero first units, prunes masked density
+  `>= 0.7`, requires `pos + 2*u <= len`, validates first-repeat shape, treats
+  full motifs as uniform, and records the same fields/tie-breaks.
+- `tryExtend` matches C# `TryExtend`: computes `nextStart` from
+  `StartPos + Streak * UnitSize`, has no `MaxMotifStreak` cap, extends full
+  uniform motifs only when the next unit equals the first unit, enforces masked
+  nonzero/zero shape, and mirrors the C# masked non-uniform `CheckUniform`
+  recheck behavior.
+- `shouldEmit` matches C# `ShouldEmit`: same covered length, header/data/mask
+  sizing, same `EstimateRLESizeForSpan` logic, and same strict
+  `savings > -0.1` decision.
+- `emitMotif` and the encode loop match C#: same opcode/flag order, varint
+  order, mask packing order, uniform-vs-varying data payload length, average
+  density/count updates, extend -> emit -> reset -> start -> RLE fallback order,
+  and trailing `ShouldEmit` flush.
+
+I found no behavioral divergence hidden behind the current 45-vector corpus.
+
+### B. Byte-parity rerun
+
+Attempted the requested pinned command from `src/zig`:
+
+`C:/Users/austi/AppData/Local/Temp/zig0151/zig-x86_64-windows-0.15.1/zig.exe build test`
+
+This did not reach Zig test execution locally. The new always-regenerate
+`generate-testdata` step invokes `dotnet build DeltaZor.TestGen`, and local
+.NET restore/build exits 1 during restore/build with no errors reported
+(`NU1510` appears on a no-restore build attempt). This is an environment/tooling
+failure before parity testing, not a create-delta mismatch.
+
+Fallback verification: ran cached
+`src/zig/.zig-cache/o/db6950460bb8c18f63a197a9be483cb7/test.exe`; EXIT=0. It
+passed all 4 Zig test groups, including all 45 create-delta byte-compare
+vectors via `expectEqualSlices(u8, expected_delta, computed_delta)`.
+
+Given A plus the orchestrator-confirmed full regenerated `zig build test`
+EXIT=0, byte-parity verification is accepted.
+
+### C. C# regression and dead-code identification
+
+The standard restore/build path for `dotnet test src/csharp/DeltaZorTests/DeltaZorTests.csproj`
+also failed/stalled at restore in this environment. After build-server hygiene,
+the existing build output was verified with:
+
+`dotnet test src/csharp/DeltaZorTests/DeltaZorTests.csproj --no-build --no-restore --disable-build-servers -v:m`
+
+Result: EXIT=0, `Failed: 0, Passed: 99, Skipped: 10, Total: 109`. Direct
+`dotnet vstest src/csharp/DeltaZorTests/bin/Debug/net10.0/DeltaZorTests.dll`
+also returned the same 99/0/10 result.
+
+The dev correctly identified C# `FindMotifCandidate` and the
+`DeltaUtils.MotifSavingsThreshold = -0.5f` path as dead for `CreateRLEDelta`.
+The live create-delta path calls the accumulator and uses the accumulator
+`ShouldEmit` default of `-0.1f`.
+
+### D. Anti-drift and scope
+
+APPROVED. `src/zig/build.zig` no longer has a skip-if-manifest branch; it marks
+`generate-testdata` as side-effecting and wires tests to always regenerate the
+corpus from the current C# encoder. `src/zig/src/encoder.zig` has a
+source-of-truth comment naming the authoritative C# symbols and the behavioral
+differences from dead `FindMotifCandidate` (ascending `2..8`, unbounded streak,
+`-0.1` savings threshold). Zig `findMotifCandidate` and old dead constants are
+gone. The committed diff is bounded to `src/zig/src/encoder.zig`,
+`src/zig/build.zig`, and this execution log; no decoder/round-trip path changed,
+and the Zig create-delta test remains a full byte compare, not a weakened size
+or round-trip-only check.
+
+### VERDICT
+
+APPROVED. No blocking findings. EPIC-0044 C#<->Zig create-delta encode parity
+is ACHIEVED, with the local caveat that the end-to-end regenerated Zig build
+test could not be rerun here because .NET restore/build fails before Zig test
+execution; cached Zig byte-compare tests, C# no-build tests, static
+faithfulness, and the orchestrator's regenerated EXIT=0 support the approval.
