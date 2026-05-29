@@ -169,3 +169,61 @@ Bounded strictly to the 0x09/0x0A path + detection + the new gate estimator + ve
   carries a full byte for each so wider shapes are representable, just not probed.
 - STOP condition did NOT trigger: arithmetic captures a real, first-principles shape (uniform
   additive shift) that XOR-based opcodes encode catastrophically worse. 0x09/0x0A are worth keeping.
+
+## Cross-kind audit (codex on claude impl)
+
+### A. Additive decode correctness + round-trip
+
+APPROVED. C# `ApplyRLEDelta` pre-fills `output` from `oldData` before the opcode loop, then the
+0x09 and 0x0A cases diverge from the XOR opcodes by applying additive reconstruction. 0x09 reads
+`elemWidth`, LE `step`, and `laneCount`, reconstructs each old lane from `output`, computes
+`(cur + step) & widthMask`, and writes the result back LE. 0x0A reads `planeCount`, byte `steps`,
+and `unitCount`, then writes `(byte)(output + step)` per plane. This is wraparound, not clamp.
+
+The encoder derives the same modular step it later serializes: global uses `(newLane - oldLane)
+mod 2^(8w)` for widths `{4,2,1,8}`, and planar uses byte subtraction for plane counts `{4,3,2}`.
+Both probes verify every lane/unit in the whole overlapping region before emitting, so an emitted
+arithmetic opcode satisfies `old + step == new` modulo the lane width for every covered element.
+
+### B. Detection soundness - strict improvement + correct yield
+
+APPROVED. Arithmetic detection is whole-region only and runs at the top of `CreateRLEDelta` when
+`EnableArithmeticDetection` is true. It requires divisibility by the candidate width/plane count,
+at least two lanes/units, at least one non-zero step, and a full-region uniformity check. There is
+no sampled or approximate match path.
+
+The emit gate is strict: `arithSize < EstimateXorRleSizeWholeRegion(...)` or
+`planarSize < EstimateXorRleSizeWholeRegion(...)`; equality yields. Identical data yields through
+the zero-step checks. Random/sparse/non-arithmetic data yields through the whole-region uniformity
+checks and then falls back to the existing XOR/RLE/motif pipeline.
+
+### C. C# <-> Zig faithfulness
+
+APPROVED. Zig mirrors the C# probe order, width sets, plane sets, LE read/write, varint size
+accounting, extension/truncation append, and additive decode. The wrapping semantics align:
+Zig uses explicit `-%` and `+%`; the C# project does not enable checked overflow, so the current
+unsigned arithmetic and byte casts use wraparound semantics. Both decoders accept the same 0x09
+widths and the same 0x0A plane-count range; the emitters only probe `{4,3,2}` for planar.
+
+### D. Coexistence + scope
+
+APPROVED. `EnableArithmeticDetection` defaults true and only gates the new whole-region probes.
+The motif tests that disable it are degenerate all-zero-base fixtures that are also valid arithmetic
+shifts; disabling arithmetic there legitimately pins those tests to the motif state machine rather
+than hiding a motif correctness issue. The pre-existing 0x00-0x08 decode cases are unchanged, and
+the RLE length-change behavior was only factored into `AppendLengthOps` with equivalent counts.
+
+### E. Independent re-run
+
+NOT RERUN. Per the audit instructions, I did not run Zig and did not run any restoring dotnet
+command. I relied on the orchestrator-confirmed C# `111 passed / 0 failed / 8 skipped` and clean
+Zig `build test` byte-parity/round-trip result. I also did not run the optional C#
+`--no-restore --no-build` test pass to preserve the requested read-only scope aside from this log
+append.
+
+### VERDICT
+
+APPROVED. Arithmetic modes 0x09/0x0A are sound: additive wraparound decode is an exact inverse of
+the verified whole-region step detection, emission is strictly smaller than the byte-RLE estimate,
+and the C# and Zig implementations preserve EPIC-0044 byte-parity/round-trip. EPIC-0046 is opened;
+orchestrator can merge `task-0364-arithmetic-modes` to `master` and close TASK-0364.
