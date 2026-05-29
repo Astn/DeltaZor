@@ -135,3 +135,89 @@ mirror the FloatRun decoder. Exact inverse of encode ⇒ round-trips byte-exactl
 ### 3.4 What's deferred
 - ChannelRun 0x08 (next opcode) — untouched. No changes to 0x06/0x08 framing or gates.
 - HalfRun flags byte is reserved `0x00` (decoder enforces); no half-specific flag bits used.
+
+## Cross-kind audit (codex on claude impl)
+
+### A. Gate soundness
+
+APPROVED. HalfRun's C# gate computes the exact 0x07 emitted size
+`1 + 1 + varint(laneCount) + ceil(laneCount/8) + 2*changedLanes`, then rejects unless
+`halfSize` is strictly smaller than byte-RLE, the motif+RLE estimator, and the FloatRun
+estimator. That is the TASK-0361 REJECT lesson applied correctly: no half run can emit on a
+tie or loss against byte-RLE, motif/RLE, or FloatRun over the candidate span.
+
+`EstimateFloatRunSizeForSpan` faithfully models the FloatRun framing for the same span when
+FloatRun can represent that span: 4-byte alignment, whole 4-byte lanes, at least two lanes,
+first lane changed, trailing-zero trim via `lastChanged + 1`, same bitmap bytes, same 7-bit
+lane-count size, and `4*changedLanes` packed bytes. It returns the +infinity sentinel only
+when FloatRun cannot encode that identical span from that position: non-4-aligned start,
+non-4-multiple span length, fewer than two float lanes, first float lane unchanged, or trim
+leaving fewer than two lanes. It intentionally does not include FloatRun's own byte-RLE and
+motif gates; HalfRun has already proven `halfSize < rleSize` and `< motifRleSize`, so any
+`floatSize <= halfSize` would also beat those alternatives and the later FloatRun probe can
+fire deterministically.
+
+The motif term reuses the live raw-byte `MotifAccumulator` + RLE size counter, not an
+ad-hoc lane-specific approximation. Because it prices the same span the existing motif/RLE
+pipeline would encode, a motif-able mid-span block still blocks HalfRun just as it blocks
+FloatRun.
+
+Probe order is safe: HalfRun runs before FloatRun, but `halfSize >= floatSize` makes it
+yield, so a smaller FloatRun span is not denied by ordering. No static counterexample found
+where HalfRun emits more bytes than byte-RLE, motif/RLE, or FloatRun for the span it covers.
+
+### B. C# to Zig faithfulness
+
+APPROVED. The new C# and Zig paths match structurally:
+
+- same fallback-branch probe order after motif start/extend/emit decisions: HalfRun first,
+  FloatRun second;
+- same alignment gates (`pos & 1` for HalfRun, `pos & 3` for FloatRun estimation);
+- same first-lane-changed and trailing-zero-trim discipline;
+- same lane-count, bitmap-byte, packed-byte, and 7-bit-size arithmetic;
+- same strict comparisons against byte-RLE, motif/RLE, then FloatRun;
+- same LSB-first bitmap construction and lane-order packed bytes;
+- same `covered = laneCount * 2` advancement and `HalfPatternCount` / `half_pattern_count`
+  increment.
+
+The Zig sentinel `std.math.maxInt(usize)` serves the same comparison role as C# `int.MaxValue`.
+The existing `estimateMotifRleSizeForSpan` and `estimateRLESizeForSpan` mirrors remain
+byte-for-byte aligned for the three gate alternatives.
+
+### C. Vectors and decode
+
+APPROVED. Test048 and Test049 are registered as real corpus vectors. Test048 covers the
+2-byte-sparse win path (`HalfPatternCount == 1`), while Test049 covers the 4-byte-dense yield
+path (`HalfPatternCount == 0`, `FloatPatternCount == 1`). The documented Test033 improvement
+from 154B to 107B is a strict local win, not a regression.
+
+0x07 decode is the inverse of encode in both languages: read zero flags, 7-bit laneCount,
+`ceil(laneCount/8)` bitmap bytes, then XOR two packed bytes for each set bit and advance
+`pos += laneCount * 2`. The C# and Zig decoders mirror the existing FloatRun shape, with
+bounds checks before output writes.
+
+### D. Scope and no-papering
+
+APPROVED. Static diff scope is bounded to the intended files:
+`Encoder.cs`, `Decoder.cs`, Zig `encoder.zig` / `decoder.zig` / `utils.zig`, TestGen
+registration, the two new Test048/Test049 vector classes, the MotifTests assertion, and this
+execution log. 0x06 FloatRun framing/gate code is not behaviorally changed; 0x08 is untouched;
+no other opcode decode path was altered.
+
+The broadened `MotifDetection_UnitSizeOver32_FallsBackToRLE` assertion is legitimate. Its
+real contract remains "unit size over cap does not emit a motif" plus exact round-trip. It
+only stops asserting the incidental fallback opcode must be NonZeroRun, allowing the tracked
+non-motif RLE-stream alternatives HalfRun or FloatRun. No vector was skipped or weakened.
+
+### E. Independent re-run
+
+No restoring `dotnet` command and no Zig subprocess were run in this audit. I relied on the
+orchestrator-confirmed clean runs: C# `103 passed / 0 failed / 10 skipped` with
+`--no-restore -m:1`, and Zig 0.15.1 `build test` `EXIT=0` with 48 active create-delta vectors
+byte-identical C#↔Zig and exact round-trips.
+
+### VERDICT
+
+APPROVED. HalfRun 0x07 is a sound strict-improvement opcode, coexists deterministically with
+FloatRun 0x06 through the motif+float-aware gate, and holds EPIC-0044 C#↔Zig byte-parity.
+Orchestrator can merge branch `task-0362-halfrun-0x07` to `master` and close TASK-0362.
