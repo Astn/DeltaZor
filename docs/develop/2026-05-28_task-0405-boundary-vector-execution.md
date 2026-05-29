@@ -118,3 +118,112 @@ approaching the threshold.
 **Recommended follow-up task:** reconcile the C#↔Zig RLE/motif encoder so `create delta`
 byte-compare is green across the full corpus (precondition for the boundary vectors to
 serve as a clean threshold-drift detector).
+
+## Cross-kind audit (codex on claude impl)
+
+- **Date:** 2026-05-28
+- **Auditor:** codex, independent audit of the TASK-0405 claude implementation and the surfaced C#<->Zig encoder-divergence finding.
+- **Working dir:** `C:/Users/austi/src/DeltaZor`
+- **Graph:** read-only inspection only; no graph writes.
+
+### Guardrails
+
+- STOP condition passed: `git rev-parse --short HEAD` -> `296ea34`.
+- Initial worktree was clean. After test execution and before this append, `git status --short -- src/zig src/csharp/DeltaZor.TestGen` was still clean.
+- No uncommitted `src/zig` or `DeltaZor.TestGen` source changes were present beyond this audit append.
+
+### A. Boundary vectors correct + actually straddle
+
+Confirmed.
+
+- `Test044_ThresholdBoundary_BelowRLE`, `Test045_ThresholdBoundary_AboveFullReplace`, and `ThresholdBoundaryBuilder` are deterministic: shared 512B base seed `0xDE17A30`, adjacent run seeds `0xDE17A31` / `0xDE17A32`, and seeded nonzero XOR values over mostly-1/occasionally-2 alternating runs.
+- `Program.cs` registers both vectors as Test044 and Test045; `DeltaFileValidationTests.ValidateTestGenSamples` regenerates the corpus, byte-compares `DeltaZor.CreateDelta(...)` against each generated `.delta.bin`, and round-trips apply.
+- Byte-level measurements from the generated C# corpus:
+  - Test044 normal delta: `delta_len=772`, `delta[4]=0x00`, RLE data length `767`.
+  - Test045 normal delta: `delta_len=517`, `delta[4]=0x01`, FullReplace payload length `512`.
+- Forced-RLE probe using the same C# test-case classes and `CompressionThreshold=1000.0`:
+  - Test044 forced RLE: `forced_rle_delta_len=772`, raw RLE data `767`, type `0x00`.
+  - Test045 forced RLE: `forced_rle_delta_len=774`, raw RLE data `769`, type `0x00`.
+
+This genuinely brackets `newLen * 1.5 = 512 * 1.5 = 768` across the strict `>` fallback: `767 <= 768` keeps RLE, while `769 > 768` falls back to FullReplace. This is not a contrived header-only pass.
+
+C# run notes:
+
+- The exact `dotnet test src/csharp/DeltaZorTests/DeltaZorTests.csproj` entrypoint stalled/returned nonzero in this Codex sandbox before reaching test output.
+- Fallback runner against the same built test assembly completed successfully:
+  - `vstest.console.exe src/csharp/DeltaZorTests/bin/Debug/net10.0/DeltaZorTests.dll /Framework:.NETCoreApp,Version=v10.0`
+  - Result: `Test Run Successful. Total tests: 109; Passed: 99; Skipped: 10`.
+  - The output shows both `DeltaFileValidationTests.ValidateTestGenSamples(id: "044", ...)` and `id: "045"` passed.
+
+### B. Encoder divergence is real
+
+Confirmed. This is a real encoder byte-disagreement, not a harness artifact.
+
+- In this sandbox, the exact `zig.exe build test` entrypoint reached `build.zig`'s testdata pre-step and printed `Test data exists, skipping generation.`, then failed before test execution with Windows sandbox `Access is denied` while Zig's build runner tried to spawn the compiler subprocess.
+- Direct execution of the existing Zig 0.15.1 test binary from `.zig-cache` exercised the same `src/zig/src/tests.zig` harness:
+  - `apply` passed for every valid vector, including Test044 and Test045.
+  - `round trip` passed for every valid vector, including Test044 and Test045.
+  - `allocation free all` passed.
+  - `create delta` failed at Test004: expected C# delta size `15`, Zig computed `29`.
+  - Final result: `3 passed; 0 skipped; 1 failed`.
+- Focused one-vector manifests, run through that same Zig test binary, reached the boundary vectors' create-delta path:
+  - Test044: C# expected `772`, Zig computed `629`; apply and round-trip still passed.
+  - Test045: C# expected `517`, Zig computed `625`; apply and round-trip still passed.
+
+The Test045 focused run is the decisive boundary signal: C# emits FullReplace (`517`, type `0x01`), while Zig emits a larger-than-FullReplace-but-under-threshold RLE delta (`625`, necessarily type `0x00` in the Zig encoder path). That is an encoder decision mismatch on identical input bytes.
+
+Code corroboration:
+
+- C#'s active small-buffer motif path in `src/csharp/DeltaZor/Encoder.cs` uses the streaming `MotifAccumulator` (`TryStart` / `TryExtend` / `ShouldEmit` / `EmitMotif`).
+- Zig's `src/zig/src/encoder.zig` directly probes `findMotifCandidate(...)` at each position and emits immediately when its savings check passes.
+- The threshold value is aligned (`CompressionThreshold` / `compression_threshold` = `1.5`), but the RLE/motif coalescing decisions that feed the threshold are not byte-identical. That explains C#=15 vs Zig=29 at Test004 and the Test045 opposite fallback decision.
+
+### C. Stale-corpus masking + TASK-0356 implication
+
+Confirmed.
+
+- `src/zig/build.zig` only regenerates/copies C# testdata when `testdata/manifest.json` is absent:
+  - if the manifest exists, it prints `Test data exists, skipping generation.`
+- The exact `zig.exe build test` attempt in this audit printed that skip message before the sandbox spawn failure, confirming the live build path still has the skip behavior.
+- Therefore a pre-existing on-disk `src/zig/testdata/manifest.json` can cause the Zig byte-compare harness to compare against an old C#-generated corpus, not the current C# encoder output.
+- The current regenerated corpus fails Zig create-delta byte parity immediately at Test004 and on the new boundary vectors, while decode/apply and Zig self round-trip still pass.
+
+Critical implication: TASK-0356's 0.15.1 "C#<->Zig byte-identical parity is VERIFIED" record was overstated. It verified the Zig encoder against the stale corpus present on disk at the time. The corrected reading is:
+
+- C# delta decode/apply parity holds for the regenerated corpus.
+- Zig self round-trip holds.
+- Current C#<->Zig encode byte-parity does **not** hold.
+- EPIC-0044 cannot claim encode parity until TASK-0429 reconciles the encoders and the regenerated corpus is byte-green.
+
+### D. No papering + disposition sound
+
+Confirmed.
+
+- The implementation did not tune the boundary seeds into an accidental C#<->Zig agreement zone.
+- The Zig byte-compare test remains failing on regenerated/current corpus data; it was not disabled, weakened, or changed to round-trip-only.
+- Read-only graph check found:
+  - `RESEARCH-2026-05-28-deltazor-csharp-zig-encoder-divergence`, summarizing Test004 C#=15 vs Zig=29, stale-corpus masking, and Test045 C# FullReplace vs Zig RLE.
+  - `TASK-0429`, backlog priority 2, titled to reconcile the C#<->Zig RLE/motif encoder so create-delta is byte-identical across the full corpus.
+  - Relationships link TASK-0429, TASK-0405, and the research record.
+
+Severity: this is a genuine product-parity defect. DeltaZor's dual-language "byte-identical create-delta" claim is false against the current C# encoder. It is larger than TASK-0405's vector addition and must be resolved before EPIC-0044 can be called complete.
+
+### E. Committed vs regenerated
+
+Confirmed.
+
+- `git show --stat --name-status HEAD` shows only the intended tracked artifacts:
+  - `docs/develop/2026-05-28_task-0405-boundary-vector-execution.md`
+  - `src/csharp/DeltaZor.TestGen/Program.cs`
+  - `src/csharp/DeltaZor.TestGen/TestCases/Test044_ThresholdBoundary_BelowRLE.cs`
+  - `src/csharp/DeltaZor.TestGen/TestCases/Test045_ThresholdBoundary_AboveFullReplace.cs`
+  - `src/csharp/DeltaZor.TestGen/TestCases/ThresholdBoundaryBuilder.cs`
+- `.gitignore` contains `testdata/`, `.zig-cache/`, `zig-out/`, `bin/`, and `obj/`.
+- `git ls-files src/zig/testdata src/csharp/DeltaZor.TestGen/bin src/csharp/DeltaZor.TestGen/obj src/zig/.zig-cache` returned no tracked files.
+- No build junk or regenerated corpus binaries are tracked.
+
+### VERDICT
+
+**APPROVED for TASK-0405.** The boundary vectors are deterministic, byte-measured, and genuinely straddle the C# fallback threshold. The implementation correctly surfaced and preserved a real C#<->Zig encoder divergence instead of papering it over.
+
+**EPIC-0044 parity is NOT achieved.** Decode/apply and Zig self round-trip pass, but current C#<->Zig create-delta byte parity fails. TASK-0429 is required before claiming cross-language encode parity.
