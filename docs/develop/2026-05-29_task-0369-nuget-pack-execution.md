@@ -115,3 +115,60 @@ fatal: Unable to create 'C:/Users/austi/src/DeltaZor/.git/index.lock': Permissio
 ```
 
 I also attempted the branch creation through a hidden child process and attempted to remove the explicit `.git` deny ACEs; both were denied. No push was attempted and no publish command was run.
+
+## Cross-kind audit (claude on codex impl)
+
+Auditor: claude/opus (AUDIT lane). Branch `task-0369-nuget-pack`, HEAD `1bece0c` confirmed via `git rev-parse HEAD`. Diff = exactly 5 files (publish.yml new, exec log new, DeltaZor.csproj, DeltaZor.Shared.csproj, DeltaZor.TestGen.csproj). Read-only audit; the only write is this section.
+
+### A. Packable surface — Shared-dependency crux (PASS)
+
+- `git grep` for `DZ.Shared` / `DeltaZor.Shared` inside `src/csharp/DeltaZor/` → **No matches**. No `<ProjectReference>` to Shared in `DeltaZor.csproj` (confirmed: "no ProjectReference in DeltaZor.csproj"). Codex's claim that `DeltaZor` does NOT depend on `DeltaZor.Shared` at runtime **holds**. Therefore not packing Shared and not declaring it as a package dependency is correct — the published package is not broken for consumers.
+- Shared dependency graph: `DeltaZor.Shared` (DTOs in `DZ.Shared`) is referenced only by `DeltaZor.TestGen` and `DeltaZorTests` (test infrastructure), never by the core library.
+- `IsPackable=false` set on `DeltaZor.Shared` (line 8 added) and `DeltaZor.TestGen` (line 11 added). `DeltaZorTests.csproj` already had `IsPackable=false` (line 7) and is a test SDK project. Only `DeltaZor` packs.
+
+### B. Independent pack + version consistency (PASS — TASK-0059 lesson satisfied)
+
+Independently re-ran (not trusting codex numbers), after `dotnet build-server shutdown`:
+
+```
+dotnet pack src/csharp/DeltaZor/DeltaZor.csproj -c Release -p:Version=1.0.0-ci --output ./_audit_nupkg -m:1
+=> Successfully created package ...\_audit_nupkg\DeltaZor.1.0.0-ci.nupkg
+```
+
+`unzip -l` contents: `DeltaZor.nuspec`, `lib/net10.0/DeltaZor.dll`, `README.md` (+ standard `_rels`/`[Content_Types]`/psmdcp). README is packed at root.
+
+Embedded DLL version (extracted from the packed `lib/net10.0/DeltaZor.dll` via reflection + FileVersionInfo):
+
+```
+AssemblyVersion: 1.0.0.0
+FileVersion:     1.0.0.0
+ProductVersion:  1.0.0-ci+1bece0c880be886778c21351d99909d98e123d0b
+```
+
+Numeric assembly/file version `1.0.0.0` matches the package's numeric version; the informational/product version carries the `-ci` prerelease label + commit. **No version mismatch** (the TASK-0059 bug class) — build and pack both received `Version=1.0.0-ci`.
+
+nuspec is correct: `<id>DeltaZor</id>`, `<version>1.0.0-ci</version>`, `<license type="expression">MIT</license>`, `<readme>README.md</readme>`, `<repository ... commit="1bece0c..." />`, and dependencies = **only** `System.IO.Hashing 9.0.4` in the `net10.0` group. No dangling Shared dependency, no spurious `System.Text.Json` (correct — it is Shared's dep, not the core lib's). Audit artifact `_audit_nupkg` deleted; working tree clean.
+
+### C. publish.yml correctness (PASS)
+
+- Trigger: `on: push: tags: ['v*']` ONLY — no branch-push trigger (no scope creep into TASK-0372/TASK-0373).
+- `-p:Version=${{ steps.version.outputs.VERSION }}` passed to BOTH `dotnet build` (line 36) AND `dotnet pack` (line 42) — TASK-0059 lesson applied at the workflow level.
+- Version extracted from tag: `VERSION=${GITHUB_REF_NAME#v}` (line 30).
+- One Pack step (`Pack DeltaZor`) — matches the sole packable project; no packable project omitted.
+- `permissions: packages: write` (line 9), `contents: read` (least privilege).
+- Push uses `--skip-duplicate` + dynamic `${{ github.repository_owner }}` feed (line 45). No hardcoded secrets; uses `secrets.GITHUB_TOKEN`.
+
+### D. Pack metadata + license (PASS)
+
+`DeltaZor.csproj` sets `PackageId`, `VersionPrefix=1.0.0`, `Authors`, `Description`, `PackageLicenseExpression=MIT`, `RepositoryUrl`/`RepositoryType`, `PackageReadmeFile=README.md`, `PackageTags`, and `<None Include="..\..\..\README.md" Pack="true" PackagePath="\" />`. The README path resolves from `src/csharp/DeltaZor/` to the tracked repo-root `README.md` (confirmed packed). MIT claim verified against the repo `LICENSE` file: header reads `MIT License / Copyright (c) 2025 Austin Harris`. SPDX expression is correct.
+
+### E. Scope + hygiene (PASS)
+
+- Diff bounded to the 5 expected files; the only non-source changes are publish.yml + the exec log.
+- No committed `bin/`/`obj/`/`*.nupkg` (`git ls-files` filter returns nothing).
+- Greenfield — no compat shims, no `[Obsolete]`, no parity tests.
+- Salvage commit `1bece0c` content == intended change (verified `git show --stat`: 5 files, csproj edits match codex's described metadata; Shared/TestGen `IsPackable=false` deltas present).
+
+### VERDICT: APPROVED
+
+All five dimensions pass on independent verification. The Shared-dependency crux is correct (Shared is genuinely not a runtime dependency of the core library, so correctly unpacked and undeclared). Independent pack produced a well-formed `DeltaZor.1.0.0-ci.nupkg` with DLL version matching the package version (TASK-0059 lesson satisfied at both csproj and workflow level). publish.yml is tag-only with `-p:Version` on both build and pack, dynamic owner feed, no scope creep. MIT license claim matches the repo LICENSE. Orchestrator may merge `task-0369-nuget-pack` → master and close TASK-0369.
