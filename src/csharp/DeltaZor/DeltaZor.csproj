@@ -8,10 +8,23 @@
         <OutputType>Library</OutputType>
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
         <RootNamespace>DZ</RootNamespace>
+        <PackageId>DeltaZor</PackageId>
+        <VersionPrefix>1.0.0</VersionPrefix>
+        <Authors>Austin Harris</Authors>
+        <Description>High-performance, zero-allocation, SIMD-accelerated adaptive binary deltas with RLE+XOR.</Description>
+        <PackageLicenseExpression>MIT</PackageLicenseExpression>
+        <RepositoryUrl>https://github.com/Astn/DeltaZor</RepositoryUrl>
+        <RepositoryType>git</RepositoryType>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+        <PackageTags>deltazor;delta;binary-delta;compression;simd</PackageTags>
     </PropertyGroup>
 
     <ItemGroup>
         <PackageReference Include="System.IO.Hashing" Version="9.0.4" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <None Include="..\..\..\README.md" Pack="true" PackagePath="\" />
     </ItemGroup>
 
     <ItemGroup>

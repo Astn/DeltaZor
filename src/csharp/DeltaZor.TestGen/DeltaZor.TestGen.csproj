@@ -8,6 +8,7 @@
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
         <RootNamespace>DZ.TestGen</RootNamespace>
         <GenerateDocumentationFile>true</GenerateDocumentationFile>
+        <IsPackable>false</IsPackable>
     </PropertyGroup>
 
     <ItemGroup>
