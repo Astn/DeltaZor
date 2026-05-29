@@ -303,6 +303,40 @@ public static class DeltaDecoder
                 }
                     break;
 
+                case DeltaUtils.RLE_RunArithmetic:
+                {
+                    // RunArithmetic 0x0B: [flags:1][step:1][runLen:7bit]
+                    // Mirrors Encoder.cs TryEmitRunArithmetic (source of truth). Per-run/segmented
+                    // byte arithmetic. flags bit0: 0=wraparound (out += step mod 256), 1=clamp
+                    // (out = clamp((i8)step + out, 0, 255)). Additive, NOT XOR; `output` still holds
+                    // old at [pos..] so clamp replays exactly (lossless).
+                    if (!reader.TryReadByte(out byte raFlags)) return false;
+                    if ((raFlags & 0xFE) != 0) return false; // reserved flag bits must be zero
+                    bool clamp = (raFlags & 0x01) != 0;
+                    if (!reader.TryReadByte(out byte step)) return false;
+                    if (!reader.TryRead7BitEncodedInt(out int runLen)) return false;
+                    if (runLen < DeltaUtils.RunArithmeticMinRun) return false;
+                    if (pos + runLen > output.Length) return false;
+
+                    if (clamp)
+                    {
+                        sbyte s = (sbyte)step;
+                        for (int k = 0; k < runLen; k++)
+                        {
+                            int r = output[pos + k] + s;
+                            if (r < 0) r = 0; else if (r > 255) r = 255;
+                            output[pos + k] = (byte)r;
+                        }
+                    }
+                    else
+                    {
+                        for (int k = 0; k < runLen; k++)
+                            output[pos + k] = (byte)(output[pos + k] + step);
+                    }
+                    pos += runLen;
+                }
+                    break;
+
                 default:
                     return false; // Invalid opcode
             }

@@ -938,6 +938,11 @@ public static class DeltaEncoder
                 AppendLengthOps(oldData, newData, writer, ref patternCounts);
                 return patternCounts;
             }
+            if (TryEmitRunArithmetic(oldData, newData, minLength, writer, ref patternCounts))
+            {
+                AppendLengthOps(oldData, newData, writer, ref patternCounts);
+                return patternCounts;
+            }
         }
 
         bool useFullXor = minLength <= options.MaxStackBufferSize && options.EnableMotifDetection;
@@ -1132,5 +1137,224 @@ public static class DeltaEncoder
         }
 
         return false;
+    }
+
+    // RunArithmetic 0x0B probe + emit. SINGLE SOURCE OF TRUTH; mirrored byte-for-byte by Zig
+    // encoder.zig tryEmitRunArithmetic. Per-run/segmented byte arithmetic: arithmetic structure that
+    // holds in SEGMENTS (e.g. bytes 100-199 shifted +10) rather than across the whole region (which
+    // 0x09/0x0A already claim). Probed AFTER 0x09/0x0A decline and BEFORE the XOR/motif pipeline, so
+    // it never disturbs 0x00-0x0A emit/decode. Greedily segments [0,minLength) into:
+    //   * arithmetic runs (emitted as 0x0B [flags][step][runLen]): the longest run from a changed
+    //     byte where a single signed step satisfies new==old+%step (wraparound, flags bit0=0) OR
+    //     new==clamp(old+(i8)step) (clamp, flags bit0=1) for every byte. Wraparound is tried first.
+    //   * filler spans (unchanged or short/unstructured changed bytes): emitted with the SAME
+    //     ZeroRun/NonZeroRun XOR encoding the baseline streaming path would produce.
+    // CLAMP IS LOSSLESS: the encoder verifies new==clamp(old+step) before emitting, and decode
+    // replays clamp(old+step) on the still-untouched old byte — a deterministic forward function of
+    // (old, step) the decoder fully owns; no exception list, exact round-trip. Emits the whole plan
+    // ONLY when its framed size is strictly smaller than the whole-region XOR byte-RLE alternative
+    // AND at least one 0x0B run is present; else declines (no-op) and the region falls through.
+    private static bool TryEmitRunArithmetic(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData,
+        int minLength, IBufferWriter<byte> writer, ref DeltaZor.OpCodeCounts counts)
+    {
+        if (minLength < DeltaUtils.RunArithmeticMinRun) return false;
+
+        // First pass: size the candidate plan and count 0x0B runs without emitting.
+        int planSize = 0;
+        int runCount = 0;
+        int i = 0;
+        while (i < minLength)
+        {
+            if (TryScanArithmeticRun(oldData, newData, minLength, i, out _, out _, out int runLen))
+            {
+                planSize += 1 + 1 + 1 + DeltaUtils.Get7BitEncodedSize(runLen); // [op][flags][step][runLen]
+                runCount++;
+                i += runLen;
+            }
+            else
+            {
+                int fillerLen = ScanFiller(oldData, newData, minLength, i);
+                planSize += SizeFiller(oldData, newData, i, fillerLen);
+                i += fillerLen;
+            }
+        }
+
+        if (runCount == 0) return false; // nothing for arithmetic to win
+
+        int rleSize = DeltaUtils.EstimateXorRleSizeWholeRegion(oldData, newData, minLength);
+        if (planSize >= rleSize) return false; // strict improvement vs the XOR/RLE alternative
+
+        // Second pass: emit the plan.
+        Span<byte> head = stackalloc byte[3];
+        Span<byte> oneByteSpan = stackalloc byte[1];
+        i = 0;
+        while (i < minLength)
+        {
+            if (TryScanArithmeticRun(oldData, newData, minLength, i, out byte step, out bool clamp, out int runLen))
+            {
+                head[0] = DeltaUtils.RLE_RunArithmetic;
+                head[1] = (byte)(clamp ? 0x01 : 0x00);
+                head[2] = step;
+                writer.Write(head);
+                DeltaUtils.Write7BitEncodedInt(writer, runLen);
+                counts.RunArithmeticCount++;
+                i += runLen;
+            }
+            else
+            {
+                int fillerLen = ScanFiller(oldData, newData, minLength, i);
+                EmitFiller(oldData, newData, i, fillerLen, writer, ref counts);
+                i += fillerLen;
+            }
+        }
+
+        return true;
+    }
+
+    // Scans the longest arithmetic run starting at `start`. A run requires a non-zero step and at
+    // least RunArithmeticMinRun bytes. Tries wraparound first (longest run with a single byte step
+    // s where new==old+%s), then clamp (longest run where new==clamp(old+(i8)s)). Picks whichever is
+    // longer (wraparound wins ties — cheaper conceptual decode). Returns false if neither qualifies.
+    private static bool TryScanArithmeticRun(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData,
+        int minLength, int start, out byte step, out bool clamp, out int runLen)
+    {
+        step = 0;
+        clamp = false;
+        runLen = 0;
+
+        if (oldData[start] == newData[start]) return false; // step 0 — ZeroRun is cheaper
+
+        // Wraparound: step from the first byte, extend while it holds.
+        byte wStep = (byte)(newData[start] - oldData[start]);
+        int wLen = 1;
+        while (start + wLen < minLength && (byte)(newData[start + wLen] - oldData[start + wLen]) == wStep)
+            wLen++;
+
+        // Clamp: try each signed step that makes the first byte clamp-consistent. The first byte is
+        // changed, so the only candidate step is one where clamp(old+s) == new for that byte. We
+        // probe the natural step (new-old as i8) plus saturating steps; in practice a clamped run is
+        // characterized by a single intended signed step that saturates at the boundary, so we
+        // derive it from the first non-saturated byte if present, else from the boundary.
+        int cLen = 0;
+        sbyte cStep = 0;
+        if (TryDeriveClampStep(oldData, newData, minLength, start, out sbyte derived))
+        {
+            int len = 1;
+            while (start + len < minLength &&
+                   newData[start + len] == ClampAdd(oldData[start + len], derived))
+                len++;
+            if (len > cLen) { cLen = len; cStep = derived; }
+        }
+
+        // Choose. Wraparound wins ties.
+        if (wLen >= cLen && wLen >= DeltaUtils.RunArithmeticMinRun)
+        {
+            step = wStep; clamp = false; runLen = wLen; return true;
+        }
+        if (cLen >= DeltaUtils.RunArithmeticMinRun)
+        {
+            step = (byte)cStep; clamp = true; runLen = cLen; return true;
+        }
+        return false;
+    }
+
+    // Saturating add of a signed step to a byte, clamped to [0,255].
+    private static byte ClampAdd(byte v, sbyte step)
+    {
+        int r = v + step;
+        if (r < 0) r = 0; else if (r > 255) r = 255;
+        return (byte)r;
+    }
+
+    // Derives the signed clamp step for a run starting at `start`. A clamp run's intended step is
+    // unambiguous only when the run contains a byte that does NOT saturate (there, step = new-old
+    // exactly). If the first byte saturates, scan forward for the first non-saturated changed byte to
+    // recover the step, then require it explains the whole prefix including the saturated bytes.
+    private static bool TryDeriveClampStep(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData,
+        int minLength, int start, out sbyte step)
+    {
+        step = 0;
+        // Find a byte in the run window where new is not at a boundary (0 or 255) => exact step.
+        for (int j = start; j < minLength; j++)
+        {
+            if (oldData[j] == newData[j]) { if (j == start) return false; else break; }
+            if (newData[j] != 0 && newData[j] != 255)
+            {
+                int d = newData[j] - oldData[j];
+                if (d < -128 || d > 127) return false;
+                step = (sbyte)d;
+                // Verify the first byte is clamp-consistent with this step.
+                return newData[start] == ClampAdd(oldData[start], step);
+            }
+        }
+        return false; // all-boundary run is ambiguous; let wraparound handle it
+    }
+
+    // Scans a filler span starting at `start`: the maximal span of bytes that does NOT begin an
+    // arithmetic run, broken into the natural zero/non-zero structure by the emit/size helpers. We
+    // advance byte-by-byte until the next position would start an arithmetic run (>= MinRun).
+    private static int ScanFiller(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData,
+        int minLength, int start)
+    {
+        int j = start;
+        do
+        {
+            j++;
+        } while (j < minLength &&
+                 !TryScanArithmeticRun(oldData, newData, minLength, j, out _, out _, out _));
+        return j - start;
+    }
+
+    // Size of the ZeroRun/NonZeroRun encoding for a filler span [start, start+len), matching the
+    // baseline streaming RLE structure exactly.
+    private static int SizeFiller(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData,
+        int start, int len)
+    {
+        int size = 0;
+        int i = start;
+        int end = start + len;
+        while (i < end)
+        {
+            bool isZero = oldData[i] == newData[i];
+            int runLen = 1;
+            while (i + runLen < end && (oldData[i + runLen] == newData[i + runLen]) == isZero) runLen++;
+            size += 1 + DeltaUtils.Get7BitEncodedSize(runLen);
+            if (!isZero) size += runLen;
+            i += runLen;
+        }
+        return size;
+    }
+
+    // Emits the ZeroRun/NonZeroRun encoding for a filler span [start, start+len), matching the
+    // baseline streaming RLE path byte-for-byte.
+    private static void EmitFiller(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData,
+        int start, int len, IBufferWriter<byte> writer, ref DeltaZor.OpCodeCounts counts)
+    {
+        Span<byte> oneByteSpan = stackalloc byte[1];
+        int i = start;
+        int end = start + len;
+        while (i < end)
+        {
+            bool isZero = oldData[i] == newData[i];
+            int runLen = 1;
+            while (i + runLen < end && (oldData[i + runLen] == newData[i + runLen]) == isZero) runLen++;
+            oneByteSpan[0] = isZero ? DeltaUtils.RLE_ZeroRun : DeltaUtils.RLE_NonZeroRun;
+            writer.Write(oneByteSpan);
+            DeltaUtils.Write7BitEncodedInt(writer, runLen);
+            if (!isZero)
+            {
+                for (int k = 0; k < runLen; k++)
+                {
+                    oneByteSpan[0] = (byte)(oldData[i + k] ^ newData[i + k]);
+                    writer.Write(oneByteSpan);
+                }
+                counts.NonZeroRunCount++;
+            }
+            else
+            {
+                counts.ZeroRunCount++;
+            }
+            i += runLen;
+        }
     }
 }

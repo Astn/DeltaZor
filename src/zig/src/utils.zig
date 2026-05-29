@@ -100,6 +100,7 @@ pub const OpCodeCounts = struct {
     channel_run_count: usize = 0,
     arithmetic_count: usize = 0,
     planar_count: usize = 0,
+    run_arithmetic_count: usize = 0,
 };
 
 pub const RLE_ZERO_RUN: u8 = 0x00;
@@ -113,6 +114,11 @@ pub const RLE_HALF_RUN: u8 = 0x07;
 pub const RLE_CHANNEL_RUN: u8 = 0x08;
 pub const RLE_ARITHMETIC: u8 = 0x09;
 pub const RLE_PLANAR: u8 = 0x0A;
+pub const RLE_RUN_ARITHMETIC: u8 = 0x0B;
+
+// RunArithmetic (0x0B) minimum run length. Mirrors C# DeltaUtils.RunArithmeticMinRun. The 0x0B
+// header is 4 bytes; a NonZeroRun over the same bytes costs 2 + runLen, so 0x0B wins at runLen >= 3.
+pub const RUN_ARITHMETIC_MIN_RUN: usize = 3;
 
 // Arithmetic (0x09) element widths probed, in selection order: int32 first (canonical counter/
 // gradient case), then int16, int8, int64. Mirrors C# DeltaUtils.ArithmeticElemWidths.

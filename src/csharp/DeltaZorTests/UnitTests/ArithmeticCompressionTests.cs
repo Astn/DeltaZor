@@ -91,52 +91,104 @@ namespace DZ.Tests.UnitTests
             Assert.Equal(newData, output);
         }
 
-        [Fact(Skip = "Not yet implemented")]
+        [Fact]
         public void PerRunArithmetic_DetectsAndAppliesLocalUniformChanges()
         {
-            // TODO: Implement per-run arithmetic detection
-            // Test with runs of bytes that all have the same delta
-            // Should encode as arithmetic runs rather than XOR runs when beneficial
+            // Arrange: a 2000-byte buffer that is a single arithmetic SEGMENT (bytes 500-1499 all
+            // shifted by a constant +7, byte wraparound) surrounded by unchanged regions. Whole-
+            // region 0x09/0x0A cannot fire (uniformity breaks at the segment edges); per-run
+            // RunArithmetic (0x0B) captures the segment in 4 bytes instead of a 1000-byte XOR run.
+            var oldData = new byte[2000];
+            var newData = new byte[2000];
+            var rng = new Random(11);
+            rng.NextBytes(oldData);
+            oldData.CopyTo(newData, 0);
+            for (int i = 500; i < 1500; i++)
+                newData[i] = (byte)(oldData[i] + 7); // local +7 wraparound segment
+
+            // Act
+            var delta = DeltaZor.CreateDelta(oldData, newData, out var stats);
+
+            // Assert: a single RunArithmetic (0x0B) opcode, no whole-region 0x09/0x0A, exact round-trip.
+            Assert.Equal(1, stats.OpCodeCounts.RunArithmeticCount);
+            Assert.Equal(0, stats.OpCodeCounts.ArithmeticCount);
+            Assert.Equal(0, stats.OpCodeCounts.PlanarCount);
+            Assert.True(delta.Length < 100, $"expected tiny per-run delta, got {delta.Length}");
+
+            var output = new byte[newData.Length];
+            var result = DeltaZor.ApplyDelta(oldData, delta, output, out _);
+            Assert.True(result.Success);
+            Assert.Equal(newData, output);
         }
 
-        [Fact(Skip = "Arithmetic compression not yet implemented")]
+        [Fact]
         public void RunArithmeticOpcode_CorrectlyEncodesAndDecodes()
         {
-            // Arrange
-            // Create test data with runs of bytes that all have the same delta
+            // Arrange: base pattern with a local run of uniform +10 changes over [100,200) — the
+            // classic per-run arithmetic case. The XOR of (i%256) vs (i%256)+10 is carry noise the
+            // XOR run encodes poorly; RunArithmetic (0x0B) captures the run in 4 bytes.
             var oldData = new byte[1000];
             var newData = new byte[1000];
-            
-            // Fill with base pattern
             for (int i = 0; i < 1000; i++)
             {
                 oldData[i] = (byte)(i % 256);
                 newData[i] = (byte)(i % 256);
             }
-            
-            // Create a run of uniform changes (+10 to bytes 100-199)
+            for (int i = 100; i < 200; i++)
+                newData[i] = (byte)((oldData[i] + 10) % 256);
+
+            // Act
+            var delta = DeltaZor.CreateDelta(oldData, newData, out var stats);
+
+            // Assert: the RunArithmetic (0x0B) opcode fires and the delta round-trips exactly.
+            Assert.Equal(1, stats.OpCodeCounts.RunArithmeticCount);
+            Assert.NotNull(delta);
+
+            var output = new byte[newData.Length];
+            var result = DeltaZor.ApplyDelta(oldData, delta, output, out _);
+            Assert.True(result.Success);
+            Assert.Equal(newData, output);
+        }
+
+        [Fact]
+        public void ClampAwareDetection_HandlesOverflowCorrectly()
+        {
+            // Arrange: a local run where the intended signed step (+10) saturates at the byte ceiling
+            // for high old values (250+10 -> 255, 255+10 -> 255) and at the floor for a separate run
+            // (3 + (-10) -> 0). The encoder must detect clamp-mode RunArithmetic (0x0B flags bit0=1)
+            // and round-trip EXACTLY — clamp is lossless because decode replays clamp(old+step) on
+            // the still-untouched old byte. A non-saturated byte in each run anchors the exact step.
+            var oldData = new byte[600];
+            var newData = new byte[600];
+            // Background: identical.
+            // Ceiling-clamp run over [100,200): old ramps through 240..255 then stays 255; +10.
             for (int i = 100; i < 200; i++)
             {
-                newData[i] = (byte)((oldData[i] + 10) % 256);
+                byte ov = (byte)Math.Min(255, 240 + (i - 100)); // 240,241,...255,255,...
+                oldData[i] = ov;
+                int r = ov + 10; if (r > 255) r = 255;
+                newData[i] = (byte)r;
+            }
+            // Floor-clamp run over [300,400): old ramps 15,14,...0 then stays 0; -10.
+            for (int i = 300; i < 400; i++)
+            {
+                byte ov = (byte)Math.Max(0, 15 - (i - 300));
+                oldData[i] = ov;
+                int r = ov - 10; if (r < 0) r = 0;
+                newData[i] = (byte)r;
             }
 
             // Act
             var delta = DeltaZor.CreateDelta(oldData, newData, out var stats);
 
-            // Assert
-            // When arithmetic compression is implemented, this should use RunArithmetic opcode (0x04)
-            // For now, we're just documenting the expected behavior
-            Assert.NotNull(delta);
-            // TODO: When implemented, verify that the delta contains the RunArithmetic opcode
-            // and that it correctly encodes the arithmetic operation
-        }
-
-        [Fact(Skip = "Not yet implemented")]
-        public void ClampAwareDetection_HandlesOverflowCorrectly()
-        {
-            // TODO: Implement clamp-aware detection
-            // Test with byte arrays where arithmetic would cause overflow
-            // Should clamp values correctly (255+10=255)
+            // Assert: clamp-aware RunArithmetic fires (>=1 run) and round-trips exactly at both
+            // saturation boundaries.
+            Assert.True(stats.OpCodeCounts.RunArithmeticCount >= 1,
+                $"expected clamp RunArithmetic, got {stats.OpCodeCounts.RunArithmeticCount}");
+            var output = new byte[newData.Length];
+            var result = DeltaZor.ApplyDelta(oldData, delta, output, out _);
+            Assert.True(result.Success);
+            Assert.Equal(newData, output);
         }
 
         [Fact(Skip = "Not yet implemented")]

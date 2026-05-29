@@ -753,6 +753,10 @@ fn createRLEDeltaDirect(old_data: []const u8, new_data: []const u8, buffer: []u8
             appendLengthOps(old_data, new_data, buffer, data_pos, counts);
             return;
         }
+        if (tryEmitRunArithmetic(old_data, new_data, min_len, buffer, data_pos, counts)) {
+            appendLengthOps(old_data, new_data, buffer, data_pos, counts);
+            return;
+        }
     }
 
     const use_full_xor = min_len <= options.max_stack_buffer_size and options.enable_motif_detection;
@@ -952,6 +956,193 @@ fn tryEmitPlanarArithmetic(old_data: []const u8, new_data: []const u8, min_len: 
     }
 
     return false;
+}
+
+// Saturating add of a signed step to a byte, clamped to [0,255]. Mirrors C# Encoder.cs ClampAdd.
+fn clampAdd(v: u8, step: i8) u8 {
+    const r: i32 = @as(i32, v) + @as(i32, step);
+    if (r < 0) return 0;
+    if (r > 255) return 255;
+    return @intCast(r);
+}
+
+// Derives the signed clamp step for a run starting at `start`. Mirrors C# Encoder.cs
+// TryDeriveClampStep. A clamp run's intended step is unambiguous only when the run contains a byte
+// that does NOT saturate (there, step = new-old exactly). Returns false (step left 0) when the run
+// is empty, has no non-boundary byte, or the derived step does not explain the first byte.
+fn tryDeriveClampStep(old_data: []const u8, new_data: []const u8, min_len: usize, start: usize, step: *i8) bool {
+    step.* = 0;
+    var j: usize = start;
+    while (j < min_len) : (j += 1) {
+        if (old_data[j] == new_data[j]) {
+            if (j == start) return false else break;
+        }
+        if (new_data[j] != 0 and new_data[j] != 255) {
+            const d: i32 = @as(i32, new_data[j]) - @as(i32, old_data[j]);
+            if (d < -128 or d > 127) return false;
+            step.* = @intCast(d);
+            return new_data[start] == clampAdd(old_data[start], step.*);
+        }
+    }
+    return false; // all-boundary run is ambiguous; wraparound handles it
+}
+
+// Scans the longest arithmetic run starting at `start`. Mirrors C# Encoder.cs TryScanArithmeticRun.
+// Tries wraparound first (longest run with a single byte step s where new==old+%s), then clamp
+// (longest run where new==clamp(old+(i8)s)); picks the longer (wraparound wins ties). Requires a
+// non-zero step and >= RUN_ARITHMETIC_MIN_RUN bytes. Returns false if neither qualifies.
+fn tryScanArithmeticRun(old_data: []const u8, new_data: []const u8, min_len: usize, start: usize, step: *u8, clamp: *bool, run_len: *usize) bool {
+    step.* = 0;
+    clamp.* = false;
+    run_len.* = 0;
+
+    if (old_data[start] == new_data[start]) return false; // step 0 — ZeroRun is cheaper
+
+    // Wraparound.
+    const w_step: u8 = new_data[start] -% old_data[start];
+    var w_len: usize = 1;
+    while (start + w_len < min_len and (new_data[start + w_len] -% old_data[start + w_len]) == w_step) w_len += 1;
+
+    // Clamp.
+    var c_len: usize = 0;
+    var c_step: i8 = 0;
+    var derived: i8 = 0;
+    if (tryDeriveClampStep(old_data, new_data, min_len, start, &derived)) {
+        var len: usize = 1;
+        while (start + len < min_len and new_data[start + len] == clampAdd(old_data[start + len], derived)) len += 1;
+        if (len > c_len) {
+            c_len = len;
+            c_step = derived;
+        }
+    }
+
+    if (w_len >= c_len and w_len >= utils.RUN_ARITHMETIC_MIN_RUN) {
+        step.* = w_step;
+        clamp.* = false;
+        run_len.* = w_len;
+        return true;
+    }
+    if (c_len >= utils.RUN_ARITHMETIC_MIN_RUN) {
+        step.* = @bitCast(c_step);
+        clamp.* = true;
+        run_len.* = c_len;
+        return true;
+    }
+    return false;
+}
+
+// Scans a filler span starting at `start`: the maximal span that does NOT begin an arithmetic run.
+// Mirrors C# Encoder.cs ScanFiller.
+fn scanFiller(old_data: []const u8, new_data: []const u8, min_len: usize, start: usize) usize {
+    var j: usize = start;
+    var s: u8 = undefined;
+    var c: bool = undefined;
+    var rl: usize = undefined;
+    while (true) {
+        j += 1;
+        if (j >= min_len) break;
+        if (tryScanArithmeticRun(old_data, new_data, min_len, j, &s, &c, &rl)) break;
+    }
+    return j - start;
+}
+
+// Size of the ZeroRun/NonZeroRun encoding for a filler span. Mirrors C# Encoder.cs SizeFiller.
+fn sizeFiller(old_data: []const u8, new_data: []const u8, start: usize, len: usize) usize {
+    var size: usize = 0;
+    var i: usize = start;
+    const end = start + len;
+    while (i < end) {
+        const is_zero = old_data[i] == new_data[i];
+        var run_len: usize = 1;
+        while (i + run_len < end and (old_data[i + run_len] == new_data[i + run_len]) == is_zero) run_len += 1;
+        size += 1 + get7BitEncodedSize(run_len);
+        if (!is_zero) size += run_len;
+        i += run_len;
+    }
+    return size;
+}
+
+// Emits the ZeroRun/NonZeroRun encoding for a filler span, matching the baseline streaming RLE path
+// byte-for-byte. Mirrors C# Encoder.cs EmitFiller.
+fn emitFiller(old_data: []const u8, new_data: []const u8, start: usize, len: usize, buffer: []u8, data_pos: *usize, counts: *utils.OpCodeCounts) void {
+    var i: usize = start;
+    const end = start + len;
+    while (i < end) {
+        const is_zero = old_data[i] == new_data[i];
+        var run_len: usize = 1;
+        while (i + run_len < end and (old_data[i + run_len] == new_data[i + run_len]) == is_zero) run_len += 1;
+        buffer[data_pos.*] = if (is_zero) utils.RLE_ZERO_RUN else utils.RLE_NON_ZERO_RUN;
+        data_pos.* += 1;
+        write7BitEncodedIntDirect(buffer, data_pos, run_len);
+        if (!is_zero) {
+            var k: usize = 0;
+            while (k < run_len) : (k += 1) {
+                buffer[data_pos.*] = old_data[i + k] ^ new_data[i + k];
+                data_pos.* += 1;
+            }
+            counts.non_zero_run_count += 1;
+        } else {
+            counts.zero_run_count += 1;
+        }
+        i += run_len;
+    }
+}
+
+// RunArithmetic 0x0B probe + emit. Mirrors C# Encoder.cs TryEmitRunArithmetic (SINGLE SOURCE OF
+// TRUTH). Framing: [0x0B][flags:1][step:1][runLen:7bit]. Per-run/segmented byte arithmetic, probed
+// AFTER 0x09/0x0A decline and BEFORE the XOR/motif pipeline. Greedily segments [0,min_len) into
+// arithmetic runs (0x0B) and ZeroRun/NonZeroRun fillers; emits the whole plan ONLY when strictly
+// smaller than the whole-region XOR byte-RLE alternative AND at least one 0x0B run is present.
+// Clamp is LOSSLESS (encoder verifies new==clamp(old+step); decode replays it on the untouched old).
+fn tryEmitRunArithmetic(old_data: []const u8, new_data: []const u8, min_len: usize, buffer: []u8, data_pos: *usize, counts: *utils.OpCodeCounts) bool {
+    if (min_len < utils.RUN_ARITHMETIC_MIN_RUN) return false;
+
+    var step: u8 = undefined;
+    var clamp: bool = undefined;
+    var run_len: usize = undefined;
+
+    // First pass: size the candidate plan and count 0x0B runs without emitting.
+    var plan_size: usize = 0;
+    var run_count: usize = 0;
+    var i: usize = 0;
+    while (i < min_len) {
+        if (tryScanArithmeticRun(old_data, new_data, min_len, i, &step, &clamp, &run_len)) {
+            plan_size += 1 + 1 + 1 + get7BitEncodedSize(run_len);
+            run_count += 1;
+            i += run_len;
+        } else {
+            const filler_len = scanFiller(old_data, new_data, min_len, i);
+            plan_size += sizeFiller(old_data, new_data, i, filler_len);
+            i += filler_len;
+        }
+    }
+
+    if (run_count == 0) return false;
+
+    const rle_size = estimateXorRleSizeWholeRegion(old_data, new_data, min_len);
+    if (plan_size >= rle_size) return false; // strict improvement vs XOR/RLE
+
+    // Second pass: emit.
+    i = 0;
+    while (i < min_len) {
+        if (tryScanArithmeticRun(old_data, new_data, min_len, i, &step, &clamp, &run_len)) {
+            buffer[data_pos.*] = utils.RLE_RUN_ARITHMETIC;
+            data_pos.* += 1;
+            buffer[data_pos.*] = if (clamp) 0x01 else 0x00;
+            data_pos.* += 1;
+            buffer[data_pos.*] = step;
+            data_pos.* += 1;
+            write7BitEncodedIntDirect(buffer, data_pos, run_len);
+            counts.run_arithmetic_count += 1;
+            i += run_len;
+        } else {
+            const filler_len = scanFiller(old_data, new_data, min_len, i);
+            emitFiller(old_data, new_data, i, filler_len, buffer, data_pos, counts);
+            i += filler_len;
+        }
+    }
+
+    return true;
 }
 
 pub fn createDeltaWithStats(old_data: []const u8, new_data: []const u8, allocator: std.mem.Allocator, options: utils.Options, stats: *utils.Stats) ![]u8 {

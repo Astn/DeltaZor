@@ -232,6 +232,10 @@ public class Program
             new Test053_PlanarArithmetic_RgbaTint(),
             // TASK-0364 (gate guard): arithmetic must YIELD to XOR/RLE on non-arithmetic random data
             new Test054_Arithmetic_YieldsToXor(),
+            // TASK-0365: RunArithmetic 0x0B — local +k byte segment (whole-region 0x09/0x0A can't fire)
+            new Test055_RunArithmetic_LocalByteShift(),
+            // TASK-0365: clamp-aware RunArithmetic 0x0B — saturating runs at byte boundaries (lossless)
+            new Test056_RunArithmetic_ClampBoundary(),
         };
 
         var manifest = new List<ManifestEntry>();

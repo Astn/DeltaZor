@@ -354,6 +354,35 @@ pub fn applyDelta(old_data: []const u8, delta: []const u8, output: []u8, allocat
                         }
                         pos += span;
                     },
+                    utils.RLE_RUN_ARITHMETIC => { // per-run/segmented arithmetic 0x0B
+                        // [flags:1][step:1][runLen:7bit]
+                        // Mirrors C# Encoder.cs TryEmitRunArithmetic (source of truth). flags bit0:
+                        // 0=wraparound (out += step mod 256), 1=clamp (out = clamp((i8)step + out)).
+                        // Additive, NOT XOR; output still holds old at [pos..] so clamp replays
+                        // exactly (lossless).
+                        const ra_flags = try readByte(&reader_pos, data);
+                        if ((ra_flags & 0xFE) != 0) return error.Invalid; // reserved bits must be zero
+                        const clamp = (ra_flags & 0x01) != 0;
+                        const step = try readByte(&reader_pos, data);
+                        const run_len = try read7bit(&reader_pos, data);
+                        if (run_len < utils.RUN_ARITHMETIC_MIN_RUN) return error.Invalid;
+                        if (pos + run_len > output.len) return error.Invalid;
+
+                        if (clamp) {
+                            const s: i8 = @bitCast(step);
+                            var k: usize = 0;
+                            while (k < run_len) : (k += 1) {
+                                const r: i32 = @as(i32, output[pos + k]) + @as(i32, s);
+                                output[pos + k] = if (r < 0) 0 else if (r > 255) 255 else @intCast(r);
+                            }
+                        } else {
+                            var k: usize = 0;
+                            while (k < run_len) : (k += 1) {
+                                output[pos + k] = output[pos + k] +% step;
+                            }
+                        }
+                        pos += run_len;
+                    },
                     else => return error.InvalidOpcode,
                 }
             }

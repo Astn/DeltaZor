@@ -125,7 +125,7 @@ public static class DeltaZor
 
         public int TotalPatternCount => ZeroRunCount + NonZeroRunCount + ExtensionCount + TruncationCount +
                                         ChannelRunCount + UniformMotifCount + VaryingMotifCount +
-                                        ArithmeticCount + PlanarCount;
+                                        ArithmeticCount + PlanarCount + RunArithmeticCount;
 
         // For future specialized pattern detection
         public int FloatPatternCount { get; set; } // 0x06 (Planned)
@@ -133,6 +133,7 @@ public static class DeltaZor
         public int ChannelRunCount { get; set; } // 0x08 (Planned)
         public int ArithmeticCount { get; set; } // 0x09 (Implemented, TASK-0364) — global arithmetic shift
         public int PlanarCount { get; set; } // 0x0A (Implemented, TASK-0364) — planar per-plane arithmetic
+        public int RunArithmeticCount { get; set; } // 0x0B (Implemented, TASK-0365) — per-run/segmented arithmetic
     }
 
     /// <summary>

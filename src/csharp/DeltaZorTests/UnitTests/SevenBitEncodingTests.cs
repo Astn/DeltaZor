@@ -17,8 +17,12 @@ namespace DZ.Tests.UnitTests
                 newData[i] = 1; // Create 150 differences
             }
 
-            // Act — use high threshold to ensure RLE is used, disable motifs to test pure RLE behavior
-            var options = new DeltaZor.DeltaOptions { CompressionThreshold = 2.0, EnableMotifDetection = false };
+            // Act — use high threshold to ensure RLE is used; disable motifs AND arithmetic
+            // detection to test pure RLE (XOR ZeroRun/NonZeroRun) behavior. (The 150-byte all-+1
+            // change is a uniform per-run arithmetic shift that RunArithmetic 0x0B would otherwise
+            // claim — gating it off isolates the baseline RLE opcode breakdown this test asserts.)
+            var options = new DeltaZor.DeltaOptions
+                { CompressionThreshold = 2.0, EnableMotifDetection = false, EnableArithmeticDetection = false };
             var delta = DeltaZor.CreateDelta(oldData, newData, options, out var createStats);
             var output = new byte[newData.Length];
             var result = DeltaZor.ApplyDelta(oldData.AsSpan(), delta.AsSpan(), output.AsSpan(), out var applyStats);

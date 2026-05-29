@@ -68,7 +68,23 @@ public static class DeltaUtils
             0x0A; // Implemented (TASK-0364): Planar per-plane arithmetic shift over interleaved byte planes.
                   // [opcode:1][planeCount:1][steps:planeCount bytes, byte wraparound][unitCount:7bit].
                   // Decode: out[u*P+p] += steps[p] (mod 256). Additive, NOT XOR.
-    // Reserve 0x0B+ for future (e.g., Clamp-Aware, per-run arithmetic).
+
+    internal const byte
+        RLE_RunArithmetic =
+            0x0B; // Implemented (TASK-0365): Per-run/segmented byte arithmetic shift (local, not
+                  // whole-region). [opcode:1][flags:1][step:1][runLen:7bit].
+                  // flags bit0: 0=wraparound (out += step mod 256), 1=clamp (out = clamp((i8)step +
+                  // out, 0, 255)). Other flag bits reserved (must be 0). Additive, NOT XOR; output
+                  // pre-filled with old so both modes are a deterministic function of (old, step) —
+                  // clamp is LOSSLESS because the encoder verifies new==clamp(old+step) before
+                  // emitting and decode replays the same forward function on the still-untouched old
+                  // byte. Coexists with ZeroRun/NonZeroRun in the segmented stream (advances pos).
+    // Reserve 0x0C+ for future.
+
+    // RunArithmetic (0x0B) minimum run length. The 0x0B header is 4 bytes ([op][flags][step]
+    // [runLen:1]); a NonZeroRun over the same bytes costs 1 (op) + 1 (len) + runLen (xor bytes), so
+    // 0x0B beats it only when runLen + 2 > 4, i.e. runLen >= 3.
+    internal const int RunArithmeticMinRun = 3;
 
     // Arithmetic (0x09) element widths probed, in selection order: int32 (canonical counter/
     // gradient case) first, then int16, int8, int64. The decoder accepts any of {1,2,4,8}.
