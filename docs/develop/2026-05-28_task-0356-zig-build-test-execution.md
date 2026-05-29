@@ -172,3 +172,18 @@ Confirmed sound.
 - Condition 2: adjust wording from "43/43 vectors ran" to "42 valid vectors from a 43-entry corpus ran"; manifest entry 8 is invalid and intentionally skipped.
 
 **VERDICT: APPROVED-WITH-CONDITIONS**
+
+---
+
+## CORRECTION (2026-05-28, via TASK-0405 / TASK-0430)
+
+The "C#↔Zig byte-identical parity is VERIFIED" conclusion above was **OVERSTATED**. It verified the Zig encoder against the **stale on-disk corpus** present at the time — `build.zig`'s generate-testdata step **skips regeneration when `testdata/manifest.json` already exists**, so the Zig byte-compare was running against an old C#-generated corpus that happened to match, masking a live encoder divergence.
+
+**Corrected reading (confirmed by TASK-0405 impl + TASK-0430 codex audit, both re-running on a regenerated corpus):**
+- ✅ Decode/apply parity + Zig self round-trip: **hold** (all vectors).
+- ❌ C#↔Zig **encode** (create-delta) **byte-parity: does NOT hold** — the encoders make different RLE/motif/fallback decisions (e.g. Test004 C#=15 vs Zig=29; boundary Test045 C# FullReplace(517) vs Zig RLE(625)).
+
+**Implications:**
+- **EPIC-0043 (Zig implementation) stays `done`** — the port + decode + round-trip are real and verified.
+- **EPIC-0044 (cross-language parity) is NOT achieved on encode** — tracked by **TASK-0429** (reconcile the C#↔Zig RLE/motif encoder so create-delta is byte-identical across the full corpus) + `RESEARCH-2026-05-28-deltazor-csharp-zig-encoder-divergence`.
+- The stale-corpus masking is itself a process gap (the regen-skip) — reconciling encoders should also ensure the corpus is regenerated (not skipped) in verification.
