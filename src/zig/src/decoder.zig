@@ -287,6 +287,73 @@ pub fn applyDelta(old_data: []const u8, delta: []const u8, output: []u8, allocat
                         }
                         pos += span;
                     },
+                    utils.RLE_ARITHMETIC => { // global arithmetic 0x09
+                        // [elemWidth:1][step: elemWidth bytes LE][laneCount:7bit]
+                        // Mirrors C# Encoder.cs TryEmitGlobalArithmetic (source of truth). Adds the
+                        // step (mod 2^(8*elemWidth), wraparound) into each LE integer lane of output
+                        // (pre-filled with old) — additive, NOT XOR.
+                        const elem_width = try readByte(&reader_pos, data);
+                        if (elem_width != 1 and elem_width != 2 and elem_width != 4 and elem_width != 8) return error.Invalid;
+                        var step_buf: [8]u8 = undefined;
+                        var b: usize = 0;
+                        while (b < elem_width) : (b += 1) {
+                            step_buf[b] = try readByte(&reader_pos, data);
+                        }
+                        const lane_count = try read7bit(&reader_pos, data);
+                        if (lane_count < 2) return error.Invalid;
+                        const span = lane_count * @as(usize, elem_width);
+                        if (pos + span > output.len) return error.Invalid;
+
+                        const width_mask: u64 = if (elem_width == 8) std.math.maxInt(u64) else (@as(u64, 1) << @intCast(8 * @as(usize, elem_width))) - 1;
+                        var step: u64 = 0;
+                        b = 0;
+                        while (b < elem_width) : (b += 1) {
+                            step |= @as(u64, step_buf[b]) << @intCast(8 * b);
+                        }
+
+                        var l: usize = 0;
+                        while (l < lane_count) : (l += 1) {
+                            const base_off = pos + l * @as(usize, elem_width);
+                            var cur: u64 = 0;
+                            b = 0;
+                            while (b < elem_width) : (b += 1) {
+                                cur |= @as(u64, output[base_off + b]) << @intCast(8 * b);
+                            }
+                            const res = (cur +% step) & width_mask;
+                            b = 0;
+                            while (b < elem_width) : (b += 1) {
+                                output[base_off + b] = @truncate(res >> @intCast(8 * b));
+                            }
+                        }
+                        pos += span;
+                    },
+                    utils.RLE_PLANAR => { // planar arithmetic 0x0A
+                        // [planeCount:1][steps: planeCount bytes][unitCount:7bit]
+                        // Mirrors C# Encoder.cs TryEmitPlanarArithmetic (source of truth). Adds
+                        // steps[p] (mod 256, byte wraparound) into output[u*P+p] (pre-filled with
+                        // old) — additive, NOT XOR.
+                        const plane_count = try readByte(&reader_pos, data);
+                        if (plane_count < 1 or plane_count > 8) return error.Invalid;
+                        var steps: [8]u8 = undefined;
+                        var c: usize = 0;
+                        while (c < plane_count) : (c += 1) {
+                            steps[c] = try readByte(&reader_pos, data);
+                        }
+                        const unit_count = try read7bit(&reader_pos, data);
+                        if (unit_count < 2) return error.Invalid;
+                        const span = unit_count * @as(usize, plane_count);
+                        if (pos + span > output.len) return error.Invalid;
+
+                        var u: usize = 0;
+                        while (u < unit_count) : (u += 1) {
+                            const base_off = pos + u * @as(usize, plane_count);
+                            c = 0;
+                            while (c < plane_count) : (c += 1) {
+                                output[base_off + c] = output[base_off + c] +% steps[c];
+                            }
+                        }
+                        pos += span;
+                    },
                     else => return error.InvalidOpcode,
                 }
             }

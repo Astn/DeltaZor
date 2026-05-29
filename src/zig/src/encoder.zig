@@ -738,6 +738,23 @@ fn createRLEDeltaDirect(old_data: []const u8, new_data: []const u8, buffer: []u8
     const min_len = @min(old_data.len, new_data.len);
     var temp_buffer: [4096]u8 = undefined;
 
+    // Arithmetic modes (0x09 Global / 0x0A Planar): probed FIRST over the WHOLE region. Detection
+    // reads old/new DIRECTLY (XOR destroys arithmetic structure via carries) and the opcode applies
+    // ADDITIVELY at decode (output is pre-filled with old, then the step is added). Each emits a
+    // single whole-region opcode, gated to strictly beat the XOR/RLE alternative; else it declines
+    // and the region falls through to the unchanged XOR/motif pipeline. Mirrors C# Encoder.cs
+    // TryEmitGlobalArithmetic / TryEmitPlanarArithmetic (source of truth). (TASK-0364.)
+    if (options.enable_arithmetic_detection) {
+        if (tryEmitGlobalArithmetic(old_data, new_data, min_len, buffer, data_pos, counts)) {
+            appendLengthOps(old_data, new_data, buffer, data_pos, counts);
+            return;
+        }
+        if (tryEmitPlanarArithmetic(old_data, new_data, min_len, buffer, data_pos, counts)) {
+            appendLengthOps(old_data, new_data, buffer, data_pos, counts);
+            return;
+        }
+    }
+
     const use_full_xor = min_len <= options.max_stack_buffer_size and options.enable_motif_detection;
     if (use_full_xor) {
         const xor_buffer = temp_buffer[0..min_len];
@@ -766,6 +783,13 @@ fn createRLEDeltaDirect(old_data: []const u8, new_data: []const u8, buffer: []u8
     }
 
     // Extension or truncation
+    appendLengthOps(old_data, new_data, buffer, data_pos, counts);
+}
+
+// Emits the Extension (0x02) or Truncation (0x03) opcode for a length change. Shared by the normal
+// RLE/XOR path and the arithmetic (0x09/0x0A) whole-region path. Mirrors C# Encoder.cs
+// AppendLengthOps (source of truth). (TASK-0364 refactor — no behavior change.)
+fn appendLengthOps(old_data: []const u8, new_data: []const u8, buffer: []u8, data_pos: *usize, counts: *utils.OpCodeCounts) void {
     if (new_data.len > old_data.len) {
         const extension = new_data[old_data.len..];
         const extension_len = extension.len;
@@ -781,6 +805,153 @@ fn createRLEDeltaDirect(old_data: []const u8, new_data: []const u8, buffer: []u8
         write7BitEncodedIntDirect(buffer, data_pos, new_data.len);
         counts.truncation_count += 1;
     }
+}
+
+// Reads a little-endian unsigned integer of `width` bytes (1,2,4,8) at offset `off`. Mirrors C#
+// Encoder.cs ReadLE.
+fn readLE(data: []const u8, off: usize, width: usize) u64 {
+    var v: u64 = 0;
+    var b: usize = 0;
+    while (b < width) : (b += 1) {
+        v |= @as(u64, data[off + b]) << @intCast(8 * b);
+    }
+    return v;
+}
+
+// Allocation-free byte-RLE size estimate of the XOR stream (old^new) over [0, length), reading
+// old/new directly (works for arbitrarily large buffers). Mirrors C# DeltaUtils.EstimateXorRle
+// SizeWholeRegion (source of truth). The cost the arithmetic opcodes must strictly beat.
+fn estimateXorRleSizeWholeRegion(old_data: []const u8, new_data: []const u8, length: usize) usize {
+    var size: usize = 0;
+    var i: usize = 0;
+    while (i < length) {
+        const is_zero = old_data[i] == new_data[i];
+        var run_len: usize = 1;
+        while (i + run_len < length and (old_data[i + run_len] == new_data[i + run_len]) == is_zero) run_len += 1;
+        size += 1 + get7BitEncodedSize(run_len);
+        if (!is_zero) size += run_len;
+        i += run_len;
+    }
+    return size;
+}
+
+// GlobalArithmetic 0x09 probe + emit. Mirrors C# Encoder.cs TryEmitGlobalArithmetic (SINGLE SOURCE
+// OF TRUTH). Framing:
+//   [0x09][elemWidth:1][step: elemWidth bytes LE (two's-complement, wraparound)][laneCount:7bit]
+// Detects a uniform additive step on fixed-width LE integer lanes across the whole region (int32
+// first). Step must be non-zero; wraparound is exact (no clamp). Emits ONLY when strictly smaller
+// than the whole-region XOR byte-RLE alternative.
+fn tryEmitGlobalArithmetic(old_data: []const u8, new_data: []const u8, min_len: usize, buffer: []u8, data_pos: *usize, counts: *utils.OpCodeCounts) bool {
+    if (min_len < 2) return false;
+
+    for (utils.arithmetic_elem_widths) |w| {
+        if (min_len % w != 0) continue;
+        const lane_count = min_len / w;
+        if (lane_count < 2) continue;
+
+        const width_mask: u64 = if (w == 8) std.math.maxInt(u64) else (@as(u64, 1) << @intCast(8 * w)) - 1;
+        const step = (readLE(new_data, 0, w) -% readLE(old_data, 0, w)) & width_mask;
+        if (step == 0) continue; // no-op shift
+
+        var uniform = true;
+        var l: usize = 1;
+        while (l < lane_count) : (l += 1) {
+            const off = l * w;
+            const d = (readLE(new_data, off, w) -% readLE(old_data, off, w)) & width_mask;
+            if (d != step) {
+                uniform = false;
+                break;
+            }
+        }
+        if (!uniform) continue;
+
+        const arith_size = 1 + 1 + w + get7BitEncodedSize(lane_count);
+        const rle_size = estimateXorRleSizeWholeRegion(old_data, new_data, min_len);
+        if (arith_size >= rle_size) continue; // strict improvement vs XOR/RLE
+
+        buffer[data_pos.*] = utils.RLE_ARITHMETIC;
+        data_pos.* += 1;
+        buffer[data_pos.*] = @intCast(w);
+        data_pos.* += 1;
+        var b: usize = 0;
+        while (b < w) : (b += 1) {
+            buffer[data_pos.*] = @truncate(step >> @intCast(8 * b));
+            data_pos.* += 1;
+        }
+        write7BitEncodedIntDirect(buffer, data_pos, lane_count);
+
+        counts.arithmetic_count += 1;
+        return true;
+    }
+
+    return false;
+}
+
+// PlanarArithmetic 0x0A probe + emit. Mirrors C# Encoder.cs TryEmitPlanarArithmetic (SINGLE SOURCE
+// OF TRUTH). Framing:
+//   [0x0A][planeCount:1][steps: planeCount bytes (byte wraparound)][unitCount:7bit]
+// Detects a per-plane uniform additive byte step on interleaved byte planes across the whole region
+// (e.g. an RGBA tint, each channel its own constant incl. 0). At least one step non-zero. Decode
+// adds steps[p] into output[u*P+p] (byte wraparound, exact). Emits ONLY when strictly smaller than
+// the whole-region XOR byte-RLE alternative.
+fn tryEmitPlanarArithmetic(old_data: []const u8, new_data: []const u8, min_len: usize, buffer: []u8, data_pos: *usize, counts: *utils.OpCodeCounts) bool {
+    if (min_len < 2) return false;
+
+    for (utils.planar_plane_counts) |p| {
+        if (min_len % p != 0) continue;
+        const unit_count = min_len / p;
+        if (unit_count < 2) continue;
+
+        var steps: [8]u8 = undefined;
+        var c: usize = 0;
+        while (c < p) : (c += 1) {
+            steps[c] = new_data[c] -% old_data[c];
+        }
+
+        var any_non_zero = false;
+        c = 0;
+        while (c < p) : (c += 1) {
+            if (steps[c] != 0) {
+                any_non_zero = true;
+                break;
+            }
+        }
+        if (!any_non_zero) continue; // no-op shift
+
+        var uniform = true;
+        var u: usize = 1;
+        while (u < unit_count and uniform) : (u += 1) {
+            const base_off = u * p;
+            c = 0;
+            while (c < p) : (c += 1) {
+                if ((new_data[base_off + c] -% old_data[base_off + c]) != steps[c]) {
+                    uniform = false;
+                    break;
+                }
+            }
+        }
+        if (!uniform) continue;
+
+        const planar_size = 1 + 1 + p + get7BitEncodedSize(unit_count);
+        const rle_size = estimateXorRleSizeWholeRegion(old_data, new_data, min_len);
+        if (planar_size >= rle_size) continue; // strict improvement vs XOR/RLE
+
+        buffer[data_pos.*] = utils.RLE_PLANAR;
+        data_pos.* += 1;
+        buffer[data_pos.*] = @intCast(p);
+        data_pos.* += 1;
+        c = 0;
+        while (c < p) : (c += 1) {
+            buffer[data_pos.*] = steps[c];
+            data_pos.* += 1;
+        }
+        write7BitEncodedIntDirect(buffer, data_pos, unit_count);
+
+        counts.planar_count += 1;
+        return true;
+    }
+
+    return false;
 }
 
 pub fn createDeltaWithStats(old_data: []const u8, new_data: []const u8, allocator: std.mem.Allocator, options: utils.Options, stats: *utils.Stats) ![]u8 {

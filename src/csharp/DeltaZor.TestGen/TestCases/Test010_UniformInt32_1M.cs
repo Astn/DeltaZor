@@ -7,7 +7,7 @@ public class Test010_UniformInt32_1M : ITestCase
 {
     public int Id => 10;
     public string Name => "Uniform_Int32_1M";
-    public int ExpectedDeltaSize => 17;
+    public int ExpectedDeltaSize => 14; // [0x09][4][05 00 00 00][laneCount=1048576] + 5 header (TASK-0364)
     public string[] Tags => new[] { "uniform", "arithmetic", "int32", "1m" };
     public string? Description => "1,048,576 × int32, all += 5";
 

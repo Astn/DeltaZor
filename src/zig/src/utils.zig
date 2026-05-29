@@ -73,6 +73,7 @@ pub const Options = struct {
     use_simd: bool = true,
     enable_motif_detection: bool = true,
     motif_min_run_threshold: usize = 0,
+    enable_arithmetic_detection: bool = true,
 };
 
 pub const Stats = struct {
@@ -97,6 +98,8 @@ pub const OpCodeCounts = struct {
     float_pattern_count: usize = 0,
     half_pattern_count: usize = 0,
     channel_run_count: usize = 0,
+    arithmetic_count: usize = 0,
+    planar_count: usize = 0,
 };
 
 pub const RLE_ZERO_RUN: u8 = 0x00;
@@ -108,3 +111,11 @@ pub const RLE_VARYING_MOTIF_REPEAT: u8 = 0x05;
 pub const RLE_FLOAT_RUN: u8 = 0x06;
 pub const RLE_HALF_RUN: u8 = 0x07;
 pub const RLE_CHANNEL_RUN: u8 = 0x08;
+pub const RLE_ARITHMETIC: u8 = 0x09;
+pub const RLE_PLANAR: u8 = 0x0A;
+
+// Arithmetic (0x09) element widths probed, in selection order: int32 first (canonical counter/
+// gradient case), then int16, int8, int64. Mirrors C# DeltaUtils.ArithmeticElemWidths.
+pub const arithmetic_elem_widths = [_]usize{ 4, 2, 1, 8 };
+// Planar (0x0A) plane counts probed: RGBA, RGB, then 2-plane. Mirrors C# DeltaUtils.PlanarPlaneCounts.
+pub const planar_plane_counts = [_]usize{ 4, 3, 2 };

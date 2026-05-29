@@ -7,16 +7,15 @@ namespace DZ.Tests.UnitTests
 {
     public class ArithmeticCompressionTests
     {
-        [Fact(Skip = "Arithmetic compression not yet implemented")]
+        [Fact]
         public void GlobalArithmeticShift_DetectsAndAppliesUniformIntegerShift()
         {
-            // Arrange
-            // Create test data with uniform integer shift
-            // All int32 values have the same delta (+5 in this example)
+            // Arrange: 250K int32 values, all += 5 (uniform global arithmetic shift). XOR-delta of
+            // x vs x+5 is carry-dependent noise the XOR opcodes encode poorly; the arithmetic
+            // difference is a constant +5 per int32 lane, so 0x09 captures the whole 1M-byte region
+            // in a handful of bytes.
             var oldData = new byte[1000000]; // 1M bytes = 250K int32 values
             var newData = new byte[1000000];
-            
-            // Fill with test data
             for (int i = 0; i < 250000; i++)
             {
                 BitConverter.GetBytes(i * 10).CopyTo(oldData, i * 4);
@@ -26,21 +25,70 @@ namespace DZ.Tests.UnitTests
             // Act
             var delta = DeltaZor.CreateDelta(oldData, newData, out var stats);
 
-            // Assert
-            // When arithmetic compression is implemented, this should produce
-            // extremely small deltas (around 8 bytes for 1M integers with uniform shift)
-            // For now, we're just documenting the expected behavior
-            Assert.NotNull(delta);
-            // TODO: When implemented, assert that delta size is very small
-            // Assert.True(delta.Length < 100); // Should be much smaller than full replace
+            // Assert: a single GlobalArithmetic (0x09) opcode, tiny delta, exact round-trip.
+            Assert.Equal(1, stats.OpCodeCounts.ArithmeticCount);
+            Assert.True(delta.Length < 100, $"expected tiny arithmetic delta, got {delta.Length}");
+
+            var output = new byte[newData.Length];
+            var result = DeltaZor.ApplyDelta(oldData, delta, output, out _);
+            Assert.True(result.Success);
+            Assert.Equal(newData, output);
         }
 
-        [Fact(Skip = "Not yet implemented")]
+        [Fact]
         public void PlanarArithmetic_DetectsAndAppliesPerChannelShifts()
         {
-            // TODO: Implement planar arithmetic detection
-            // Test with RGBA data where only red channel changes
-            // Should detect per-channel arithmetic and apply selectively
+            // Arrange: 4000 RGBA pixels where each channel shifts by its own constant (R+10, G-6
+            // via byte wraparound, B+1, A+0). The per-plane arithmetic difference is uniform per
+            // channel, so PlanarArithmetic (0x0A, planeCount=4) captures the whole region.
+            const int px = 4000;
+            var oldData = new byte[px * 4];
+            var newData = new byte[px * 4];
+            var rng = new Random(7);
+            for (int i = 0; i < px; i++)
+            {
+                byte r = (byte)rng.Next(256), g = (byte)rng.Next(256),
+                     b = (byte)rng.Next(256), a = (byte)rng.Next(256);
+                oldData[i * 4] = r; oldData[i * 4 + 1] = g; oldData[i * 4 + 2] = b; oldData[i * 4 + 3] = a;
+                newData[i * 4] = (byte)(r + 10);
+                newData[i * 4 + 1] = (byte)(g + 250); // -6 wraparound
+                newData[i * 4 + 2] = (byte)(b + 1);
+                newData[i * 4 + 3] = a; // +0
+            }
+
+            // Act
+            var delta = DeltaZor.CreateDelta(oldData, newData, out var stats);
+
+            // Assert: a single PlanarArithmetic (0x0A) opcode, tiny delta, exact round-trip.
+            Assert.Equal(1, stats.OpCodeCounts.PlanarCount);
+            Assert.True(delta.Length < 100, $"expected tiny planar delta, got {delta.Length}");
+
+            var output = new byte[newData.Length];
+            var result = DeltaZor.ApplyDelta(oldData, delta, output, out _);
+            Assert.True(result.Success);
+            Assert.Equal(newData, output);
+        }
+
+        [Fact]
+        public void ArithmeticModes_YieldOnNonArithmeticData()
+        {
+            // Random unstructured changes have no uniform per-lane/per-plane step, so neither 0x09
+            // nor 0x0A may fire — the region must fall through to the XOR/RLE pipeline unchanged.
+            var oldData = new byte[2048];
+            var newData = new byte[2048];
+            var rng = new Random(3);
+            rng.NextBytes(oldData);
+            rng.NextBytes(newData);
+
+            var delta = DeltaZor.CreateDelta(oldData, newData, out var stats);
+
+            Assert.Equal(0, stats.OpCodeCounts.ArithmeticCount);
+            Assert.Equal(0, stats.OpCodeCounts.PlanarCount);
+
+            var output = new byte[newData.Length];
+            var result = DeltaZor.ApplyDelta(oldData, delta, output, out _);
+            Assert.True(result.Success);
+            Assert.Equal(newData, output);
         }
 
         [Fact(Skip = "Not yet implemented")]

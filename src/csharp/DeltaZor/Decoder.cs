@@ -30,6 +30,7 @@ public static class DeltaDecoder
         int pos = 0; // Start at beginning of overlapping region
 
         Span<int> posListBuffer = stackalloc int[32];
+        Span<byte> stepBuf = stackalloc byte[8]; // arithmetic (0x09) step / planar (0x0A) steps scratch
 
         while (reader.Remaining > 0)
         {
@@ -234,6 +235,69 @@ public static class DeltaDecoder
                             if (!reader.TryReadByte(out byte b)) return false;
                             output[baseOff + c] ^= b;
                         }
+                    }
+                    pos += span;
+                }
+                    break;
+
+                case DeltaUtils.RLE_Arithmetic:
+                {
+                    // GlobalArithmetic 0x09: [elemWidth:1][step: elemWidth bytes LE][laneCount:7bit]
+                    // Mirrors Encoder.cs TryEmitGlobalArithmetic (source of truth). Adds the step
+                    // (mod 2^(8*elemWidth), wraparound) into each LE integer lane of `output`
+                    // (pre-filled with old) — additive, NOT XOR.
+                    if (!reader.TryReadByte(out byte elemWidth)) return false;
+                    if (elemWidth != 1 && elemWidth != 2 && elemWidth != 4 && elemWidth != 8) return false;
+                    for (int b = 0; b < elemWidth; b++)
+                    {
+                        if (!reader.TryReadByte(out byte sb)) return false;
+                        stepBuf[b] = sb;
+                    }
+                    if (!reader.TryRead7BitEncodedInt(out int laneCount)) return false;
+                    if (laneCount < 2) return false;
+                    int span = laneCount * elemWidth;
+                    if (pos + span > output.Length) return false;
+
+                    ulong widthMask = elemWidth == 8 ? ulong.MaxValue : (1UL << (8 * elemWidth)) - 1UL;
+                    ulong step = 0;
+                    for (int b = 0; b < elemWidth; b++) step |= (ulong)stepBuf[b] << (8 * b);
+
+                    for (int l = 0; l < laneCount; l++)
+                    {
+                        int baseOff = pos + l * elemWidth;
+                        ulong cur = 0;
+                        for (int b = 0; b < elemWidth; b++) cur |= (ulong)output[baseOff + b] << (8 * b);
+                        ulong res = (cur + step) & widthMask;
+                        for (int b = 0; b < elemWidth; b++) output[baseOff + b] = (byte)(res >> (8 * b));
+                    }
+                    pos += span;
+                }
+                    break;
+
+                case DeltaUtils.RLE_Planar:
+                {
+                    // PlanarArithmetic 0x0A: [planeCount:1][steps: planeCount bytes][unitCount:7bit]
+                    // Mirrors Encoder.cs TryEmitPlanarArithmetic (source of truth). Adds steps[p]
+                    // (mod 256, byte wraparound) into each output byte at offset u*P+p (`output`
+                    // pre-filled with old) — additive, NOT XOR.
+                    if (!reader.TryReadByte(out byte planeCount)) return false;
+                    if (planeCount < 1 || planeCount > 8) return false;
+                    Span<byte> steps = stepBuf;
+                    for (int c = 0; c < planeCount; c++)
+                    {
+                        if (!reader.TryReadByte(out byte sc)) return false;
+                        steps[c] = sc;
+                    }
+                    if (!reader.TryRead7BitEncodedInt(out int unitCount)) return false;
+                    if (unitCount < 2) return false;
+                    int span = unitCount * planeCount;
+                    if (pos + span > output.Length) return false;
+
+                    for (int u = 0; u < unitCount; u++)
+                    {
+                        int baseOff = pos + u * planeCount;
+                        for (int c = 0; c < planeCount; c++)
+                            output[baseOff + c] = (byte)(output[baseOff + c] + steps[c]);
                     }
                     pos += span;
                 }

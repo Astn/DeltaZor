@@ -919,6 +919,27 @@ public static class DeltaEncoder
         Span<byte> oneByteSpan = stackalloc byte[1];
         Span<byte> tempBuffer = stackalloc byte[options.MaxStackBufferSize];
 
+        // Arithmetic modes (0x09 Global / 0x0A Planar): probed FIRST over the WHOLE overlapping
+        // region [0, minLength). Unlike the XOR-stream opcodes (0x00-0x08), arithmetic structure
+        // (new = old + step) is destroyed by XOR (carries make old^(old+k) data-dependent noise),
+        // so detection reads old/new DIRECTLY and the opcode applies ADDITIVELY at decode time
+        // (the decoder pre-fills output with old, then adds the step). Each emits a single opcode
+        // covering the whole region, gated to strictly beat the XOR/RLE alternative — else it
+        // declines and the region falls through to the unchanged XOR/motif pipeline. (TASK-0364.)
+        if (options.EnableArithmeticDetection)
+        {
+            if (TryEmitGlobalArithmetic(oldData, newData, minLength, writer, ref patternCounts))
+            {
+                AppendLengthOps(oldData, newData, writer, ref patternCounts);
+                return patternCounts;
+            }
+            if (TryEmitPlanarArithmetic(oldData, newData, minLength, writer, ref patternCounts))
+            {
+                AppendLengthOps(oldData, newData, writer, ref patternCounts);
+                return patternCounts;
+            }
+        }
+
         bool useFullXor = minLength <= options.MaxStackBufferSize && options.EnableMotifDetection;
         if (useFullXor)
         {
@@ -954,6 +975,18 @@ public static class DeltaEncoder
         }
 
         // Handle length differences
+        AppendLengthOps(oldData, newData, writer, ref patternCounts);
+
+        return patternCounts;
+    }
+
+    // Emits the Extension (0x02) or Truncation (0x03) opcode for a length change between old and
+    // new. Shared by the normal RLE/XOR path and the arithmetic (0x09/0x0A) whole-region path so
+    // both reconstruct the trailing bytes identically. (TASK-0364 refactor — no behavior change.)
+    private static void AppendLengthOps(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData,
+        IBufferWriter<byte> writer, ref DeltaZor.OpCodeCounts patternCounts)
+    {
+        Span<byte> oneByteSpan = stackalloc byte[1];
         if (newData.Length > oldData.Length)
         {
             ReadOnlySpan<byte> extension = newData[oldData.Length..];
@@ -961,16 +994,143 @@ public static class DeltaEncoder
             writer.Write(oneByteSpan);
             DeltaUtils.Write7BitEncodedInt(writer, extension.Length);
             writer.Write(extension);
-            patternCounts = patternCounts with { ExtensionCount = patternCounts.ExtensionCount + 1 };
+            patternCounts.ExtensionCount++;
         }
         else if (newData.Length < oldData.Length)
         {
             oneByteSpan[0] = DeltaUtils.RLE_Truncation;
             writer.Write(oneByteSpan);
             DeltaUtils.Write7BitEncodedInt(writer, newData.Length);
-            patternCounts = patternCounts with { TruncationCount = patternCounts.TruncationCount + 1 };
+            patternCounts.TruncationCount++;
+        }
+    }
+
+    // Reads a little-endian unsigned integer of `width` bytes (1,2,4,8) starting at offset `off`.
+    private static ulong ReadLE(ReadOnlySpan<byte> data, int off, int width)
+    {
+        ulong v = 0;
+        for (int b = 0; b < width; b++)
+            v |= (ulong)data[off + b] << (8 * b);
+        return v;
+    }
+
+    // GlobalArithmetic 0x09 probe + emit. SINGLE SOURCE OF TRUTH; mirrored byte-for-byte by Zig
+    // encoder.zig tryEmitGlobalArithmetic. Framing:
+    //   [0x09][elemWidth:1][step: elemWidth bytes LE (two's-complement, wraparound)][laneCount:7bit]
+    // Detects a UNIFORM additive step on fixed-width little-endian integer lanes across the WHOLE
+    // overlapping region: for the first feasible width w in {4,2,1,8} (int32 first — the canonical
+    // counter/gradient/+k case), require minLength % w == 0, >= 2 lanes, and that EVERY lane has
+    // the identical wraparound difference step = (newLane - oldLane) mod 2^(8w). The step must be
+    // non-zero (a zero step means new==old, which the ZeroRun path encodes in ~3 bytes — nothing
+    // for arithmetic to win). Wraparound (two's-complement) is exact and lossless; NO clamp is used
+    // (clamp would be lossy and cannot round-trip). Decode adds step into each lane of `output`
+    // (pre-filled with old) — additive, not XOR. Emits ONLY when the framed size is strictly smaller
+    // than the whole-region XOR byte-RLE alternative (EstimateXorRleSizeWholeRegion); else declines.
+    private static bool TryEmitGlobalArithmetic(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData,
+        int minLength, IBufferWriter<byte> writer, ref DeltaZor.OpCodeCounts counts)
+    {
+        if (minLength < 2) return false;
+
+        foreach (int w in DeltaUtils.ArithmeticElemWidths)
+        {
+            if (minLength % w != 0) continue;
+            int laneCount = minLength / w;
+            if (laneCount < 2) continue;
+
+            ulong widthMask = w == 8 ? ulong.MaxValue : (1UL << (8 * w)) - 1UL;
+            ulong step = (ReadLE(newData, 0, w) - ReadLE(oldData, 0, w)) & widthMask;
+            if (step == 0) continue; // no-op shift — ZeroRun encodes new==old far cheaper
+
+            bool uniform = true;
+            for (int l = 1; l < laneCount; l++)
+            {
+                int off = l * w;
+                ulong d = (ReadLE(newData, off, w) - ReadLE(oldData, off, w)) & widthMask;
+                if (d != step) { uniform = false; break; }
+            }
+            if (!uniform) continue;
+
+            int arithSize = 1 + 1 + w + DeltaUtils.Get7BitEncodedSize(laneCount);
+            int rleSize = DeltaUtils.EstimateXorRleSizeWholeRegion(oldData, newData, minLength);
+            if (arithSize >= rleSize) continue; // strict improvement vs the XOR/RLE alternative
+
+            Span<byte> head = stackalloc byte[2];
+            head[0] = DeltaUtils.RLE_Arithmetic;
+            head[1] = (byte)w;
+            writer.Write(head);
+            Span<byte> stepBytes = stackalloc byte[8];
+            for (int b = 0; b < w; b++) stepBytes[b] = (byte)(step >> (8 * b));
+            writer.Write(stepBytes[..w]);
+            DeltaUtils.Write7BitEncodedInt(writer, laneCount);
+
+            counts.ArithmeticCount++;
+            return true;
         }
 
-        return patternCounts;
+        return false;
+    }
+
+    // PlanarArithmetic 0x0A probe + emit. SINGLE SOURCE OF TRUTH; mirrored byte-for-byte by Zig
+    // encoder.zig tryEmitPlanarArithmetic. Framing:
+    //   [0x0A][planeCount:1][steps: planeCount bytes (byte wraparound)][unitCount:7bit]
+    // Detects a PER-PLANE uniform additive byte step on interleaved byte planes across the WHOLE
+    // region (e.g. an RGBA tint where each channel shifts by its own constant, including 0): for the
+    // first feasible plane count P in {4,3,2}, require minLength % P == 0, >= 2 units, derive a step
+    // per plane from the first unit, and require EVERY unit to match all P steps (byte wraparound).
+    // At least one plane step must be non-zero (all-zero means new==old). Decode adds steps[p] into
+    // each output byte at offset u*P+p (output pre-filled with old) — additive, not XOR, byte
+    // wraparound (exact, no clamp). Probed AFTER GlobalArithmetic (which subsumes the all-planes-
+    // equal-step case more compactly). Emits ONLY when strictly smaller than the whole-region XOR
+    // byte-RLE alternative; else declines and the region falls through to the XOR/motif pipeline.
+    private static bool TryEmitPlanarArithmetic(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData,
+        int minLength, IBufferWriter<byte> writer, ref DeltaZor.OpCodeCounts counts)
+    {
+        if (minLength < 2) return false;
+
+        foreach (int p in DeltaUtils.PlanarPlaneCounts)
+        {
+            if (minLength % p != 0) continue;
+            int unitCount = minLength / p;
+            if (unitCount < 2) continue;
+
+            Span<byte> steps = stackalloc byte[8];
+            for (int c = 0; c < p; c++)
+                steps[c] = (byte)(newData[c] - oldData[c]);
+
+            bool anyNonZero = false;
+            for (int c = 0; c < p; c++) if (steps[c] != 0) { anyNonZero = true; break; }
+            if (!anyNonZero) continue; // no-op shift
+
+            bool uniform = true;
+            for (int u = 1; u < unitCount && uniform; u++)
+            {
+                int baseOff = u * p;
+                for (int c = 0; c < p; c++)
+                {
+                    if ((byte)(newData[baseOff + c] - oldData[baseOff + c]) != steps[c])
+                    {
+                        uniform = false;
+                        break;
+                    }
+                }
+            }
+            if (!uniform) continue;
+
+            int planarSize = 1 + 1 + p + DeltaUtils.Get7BitEncodedSize(unitCount);
+            int rleSize = DeltaUtils.EstimateXorRleSizeWholeRegion(oldData, newData, minLength);
+            if (planarSize >= rleSize) continue; // strict improvement vs the XOR/RLE alternative
+
+            Span<byte> head = stackalloc byte[2];
+            head[0] = DeltaUtils.RLE_Planar;
+            head[1] = (byte)p;
+            writer.Write(head);
+            writer.Write(steps[..p]);
+            DeltaUtils.Write7BitEncodedInt(writer, unitCount);
+
+            counts.PlanarCount++;
+            return true;
+        }
+
+        return false;
     }
 }

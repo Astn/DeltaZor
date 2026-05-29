@@ -226,6 +226,12 @@ public class Program
             new Test050_ChannelRun_Stride12_SingleChannel(),
             // TASK-0363 (gate guard): ChannelRun must YIELD to motif on stride <= 8 channel data
             new Test051_ChannelRun_YieldsToMotif(),
+            // TASK-0364: GlobalArithmetic 0x09 — uniform int32 +k shift (XOR opcodes encode poorly)
+            new Test052_GlobalArithmetic_Int32Ramp(),
+            // TASK-0364: PlanarArithmetic 0x0A — per-channel RGBA tint (global can't capture)
+            new Test053_PlanarArithmetic_RgbaTint(),
+            // TASK-0364 (gate guard): arithmetic must YIELD to XOR/RLE on non-arithmetic random data
+            new Test054_Arithmetic_YieldsToXor(),
         };
 
         var manifest = new List<ManifestEntry>();

@@ -84,6 +84,15 @@ public static class DeltaZor
 
         public bool EnableMotifDetection { get; set; } = true;
         public int MotifMinRunThreshold { get; set; } = 0; // Align with SimdMinThreshold
+
+        /// <summary>
+        /// Whether to probe the whole-region arithmetic modes (0x09 Global / 0x0A Planar) before
+        /// the XOR/motif pipeline. Default true. Motif-internals unit tests that craft degenerate
+        /// all-zero-base uniform patterns (which are simultaneously valid arithmetic shifts) set
+        /// this false to exercise the motif state machine directly — the same way they set
+        /// CompressionThreshold high to force the RLE path. (TASK-0364.)
+        /// </summary>
+        public bool EnableArithmeticDetection { get; set; } = true;
     }
 
     /// <summary>
@@ -115,12 +124,15 @@ public static class DeltaZor
         public float AverageMaskDensity { get; set; } // Avg popcount(mask)/unitSize for motif sparsity
 
         public int TotalPatternCount => ZeroRunCount + NonZeroRunCount + ExtensionCount + TruncationCount +
-                                        ChannelRunCount + UniformMotifCount + VaryingMotifCount;
+                                        ChannelRunCount + UniformMotifCount + VaryingMotifCount +
+                                        ArithmeticCount + PlanarCount;
 
         // For future specialized pattern detection
         public int FloatPatternCount { get; set; } // 0x06 (Planned)
         public int HalfPatternCount { get; set; } // 0x07 (Planned)
         public int ChannelRunCount { get; set; } // 0x08 (Planned)
+        public int ArithmeticCount { get; set; } // 0x09 (Implemented, TASK-0364) — global arithmetic shift
+        public int PlanarCount { get; set; } // 0x0A (Implemented, TASK-0364) — planar per-plane arithmetic
     }
 
     /// <summary>

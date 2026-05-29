@@ -59,12 +59,23 @@ public static class DeltaUtils
 
     internal const byte
         RLE_Arithmetic =
-            0x09; // Pending: Arithmetic compression; [opcode:1][model_id:1][count:7bit][compressed_data:variable].
+            0x09; // Implemented (TASK-0364): Global arithmetic shift over fixed-width LE integer lanes.
+                  // [opcode:1][elemWidth:1][step:elemWidth LE, two's-complement wraparound][laneCount:7bit].
+                  // Decode: out_lane += step (mod 2^(8*elemWidth)) for each lane. Additive, NOT XOR.
 
     internal const byte
         RLE_Planar =
-            0x0A; // Pending: Planar (e.g., color channel) compression; [opcode:1][plane_count:1][count:7bit][plane_data:variable].
-    // Reserve 0x0B+ for future (e.g., Clamp-Aware, Global Shift).
+            0x0A; // Implemented (TASK-0364): Planar per-plane arithmetic shift over interleaved byte planes.
+                  // [opcode:1][planeCount:1][steps:planeCount bytes, byte wraparound][unitCount:7bit].
+                  // Decode: out[u*P+p] += steps[p] (mod 256). Additive, NOT XOR.
+    // Reserve 0x0B+ for future (e.g., Clamp-Aware, per-run arithmetic).
+
+    // Arithmetic (0x09) element widths probed, in selection order: int32 (canonical counter/
+    // gradient case) first, then int16, int8, int64. The decoder accepts any of {1,2,4,8}.
+    internal static readonly int[] ArithmeticElemWidths = { 4, 2, 1, 8 };
+
+    // Planar (0x0A) plane counts probed, in selection order: RGBA, RGB, then 2-plane.
+    internal static readonly int[] PlanarPlaneCounts = { 4, 3, 2 };
 
     internal const int MotifProbeCount = 7; // UnitSizes 2-8
     internal static readonly int[] MotifUnitSizes = { 4, 8, 2, 3, 5, 6, 7 };
@@ -328,6 +339,32 @@ public static class DeltaUtils
             bool isZero = span[i] == 0;
             int runLen = 1;
             while (i + runLen < len && (span[i + runLen] == 0) == isZero) runLen++;
+            size += 1 + Get7BitEncodedSize(runLen);
+            if (!isZero) size += runLen;
+            i += runLen;
+        }
+
+        return size;
+    }
+
+    /// <summary>
+    /// Allocation-free byte-RLE size estimate of the XOR stream (old^new) over [0, length),
+    /// reading old/new directly so it works for arbitrarily large (streaming) buffers without
+    /// materializing the XOR buffer. Mirrors EstimateRLESizeForSpan applied to (old^new). This is
+    /// the alternative-cost lower bound the arithmetic opcodes (0x09/0x0A) must strictly beat for
+    /// the whole region — the byte-RLE path is exactly what the streaming encoder emits for large
+    /// buffers, and a sound floor for the motif path on small ones. (TASK-0364.)
+    /// </summary>
+    internal static int EstimateXorRleSizeWholeRegion(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData,
+        int length)
+    {
+        int size = 0;
+        int i = 0;
+        while (i < length)
+        {
+            bool isZero = oldData[i] == newData[i];
+            int runLen = 1;
+            while (i + runLen < length && (oldData[i + runLen] == newData[i + runLen]) == isZero) runLen++;
             size += 1 + Get7BitEncodedSize(runLen);
             if (!isZero) size += runLen;
             i += runLen;

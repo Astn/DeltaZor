@@ -59,7 +59,7 @@ namespace DZ.Tests.UnitTests
                 }
             }
 
-            var options = new DeltaZor.DeltaOptions { CompressionThreshold = 2.0 };
+            var options = new DeltaZor.DeltaOptions { CompressionThreshold = 2.0, EnableArithmeticDetection = false };
 
             // Act
             var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);
@@ -95,7 +95,7 @@ _output.WriteLine("Output: " + string.Join(", ", output));
             newData[0] = 1;
             newData[3] = 2;
 
-            var options = new DeltaZor.DeltaOptions();
+            var options = new DeltaZor.DeltaOptions { EnableArithmeticDetection = false };
 
             // Act
             var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);
@@ -136,7 +136,7 @@ _output.WriteLine("Output: " + string.Join(", ", output));
                 newData[r * unitSize + 1] = 0x01;
             }
 
-            var options = new DeltaZor.DeltaOptions();
+            var options = new DeltaZor.DeltaOptions { EnableArithmeticDetection = false };
 
             // Act
             var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);
@@ -170,7 +170,7 @@ public void MotifDetection_HighDensity_NoEmission()
                 newData[i * 4 + 2] = 3;
             }
 
-            var options = new DeltaZor.DeltaOptions();
+            var options = new DeltaZor.DeltaOptions { EnableArithmeticDetection = false };
 
             // Act
             var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);
@@ -190,7 +190,7 @@ public void MotifDetection_HighDensity_NoEmission()
             newData[0] = 1;
             newData[9] = 1;
 
-            var options = new DeltaZor.DeltaOptions ();
+            var options = new DeltaZor.DeltaOptions { EnableArithmeticDetection = false };
 
             // Act
             var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);
@@ -233,7 +233,7 @@ _output.WriteLine("Output: " + string.Join(", ", output));
                 }
             }
 
-            var options = new DeltaZor.DeltaOptions { CompressionThreshold = 2.0 };
+            var options = new DeltaZor.DeltaOptions { CompressionThreshold = 2.0, EnableArithmeticDetection = false };
 
             // Act
             var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);
@@ -328,7 +328,7 @@ _output.WriteLine("Output: " + string.Join(", ", output));
             newData[1] = 1; // Simple change
             newData[unitSize + 1] = 1;
 
-            var options = new DeltaZor.DeltaOptions();
+            var options = new DeltaZor.DeltaOptions { EnableArithmeticDetection = false };
 
             // Act
             var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);
@@ -363,7 +363,7 @@ _output.WriteLine("Output: " + string.Join(", ", output));
             newData[1] = 1; // Change only position 1 in two units of 4
             newData[5] = 1;
 
-            var options = new DeltaZor.DeltaOptions();
+            var options = new DeltaZor.DeltaOptions { EnableArithmeticDetection = false };
 
             // Act
             var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);
@@ -389,7 +389,7 @@ _output.WriteLine("Output: " + string.Join(", ", output));
                 newData[i * 4 + 3] = 2;
             }
 
-            var options = new DeltaZor.DeltaOptions { EnableMotifDetection = false };
+            var options = new DeltaZor.DeltaOptions { EnableMotifDetection = false, EnableArithmeticDetection = false };
 
             // Act
             var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);
@@ -416,7 +416,7 @@ _output.WriteLine("Output: " + string.Join(", ", output));
             byte[] xorPayload = { 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00 };
             xorPayload.CopyTo(newData, 0);
 
-            var options = new DeltaZor.DeltaOptions();
+            var options = new DeltaZor.DeltaOptions { EnableArithmeticDetection = false };
 
             // Act
             var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);
@@ -444,7 +444,7 @@ _output.WriteLine("Output: " + string.Join(", ", output));
             byte[] xorPayload = { 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00 };
             xorPayload.CopyTo(newData, 0);
 
-            var options = new DeltaZor.DeltaOptions();
+            var options = new DeltaZor.DeltaOptions { EnableArithmeticDetection = false };
 
             // Act
             var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);
@@ -473,7 +473,7 @@ _output.WriteLine("Output: " + string.Join(", ", output));
             for (int r = 0; r < 5; r++)
                 unitXor.CopyTo(newData, r * 4);
 
-            var options = new DeltaZor.DeltaOptions();
+            var options = new DeltaZor.DeltaOptions { EnableArithmeticDetection = false };
 
             // Act
             var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);
@@ -504,7 +504,7 @@ _output.WriteLine("Output: " + string.Join(", ", output));
             for (int r = 0; r < repeatCount; r++)
                 newData[r * unitSize + 0] = 0x01; // Uniform change
 
-            var options = new DeltaZor.DeltaOptions();
+            var options = new DeltaZor.DeltaOptions { EnableArithmeticDetection = false };
 
             // Act
             var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);
@@ -532,7 +532,7 @@ _output.WriteLine("Output: " + string.Join(", ", output));
             for (int r = 0; r < 3; r++)
                 unitXor.CopyTo(newData, r * 5);
 
-            var options = new DeltaZor.DeltaOptions();
+            var options = new DeltaZor.DeltaOptions { EnableArithmeticDetection = false };
 
             // Act
             var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);
@@ -562,7 +562,7 @@ _output.WriteLine("Output: " + string.Join(", ", output));
                 newData[r * 4 + 3] = 0x01; // Same uniform value (avoids unit=2 non-uniform detection)
             }
 
-            var options = new DeltaZor.DeltaOptions { CompressionThreshold = 2.0 };
+            var options = new DeltaZor.DeltaOptions { CompressionThreshold = 2.0, EnableArithmeticDetection = false };
 
 // Act
             _output.WriteLine($"OldData length: {oldData.Length}");
