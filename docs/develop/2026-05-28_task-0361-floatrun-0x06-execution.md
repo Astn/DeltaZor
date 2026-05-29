@@ -437,3 +437,98 @@ untouched (the fix is encoder-side selection only; the wire format is identical)
 **Confidence:** high — regression proved with a concrete vector, root-caused (TryStart ≠
 net-win), fixed at the gate (strict-improvement vs the real motif/RLE alternative), both
 toolchains green on real runs, byte-parity + round-trip verified, Test046 byte-identical.
+
+## Cross-kind RE-AUDIT (codex on claude remediation)
+
+- **Date:** 2026-05-29
+- **Branch/HEAD checked:** `task-0361-floatrun-0x06` / `6df1ac4bfcf3ac17216e9b121bd44c85cb2b396b`
+- **Scope:** static re-audit of the claude remediation to codex's prior REJECT. No graph update. I did not spawn another codex.
+
+### A. Gate soundness
+
+APPROVED. The original gap is closed.
+
+The live FloatRun gate in `Encoder.cs` now computes `floatSize`, `rleSize`, and
+`motifRleSize`, and emits only if `floatSize < rleSize` and `floatSize < motifRleSize`
+(`TryEmitFloatRun`, lines 548-555). This directly blocks the prior MID-SPAN failure mode:
+a changed first lane can no longer let the maximal FloatRun swallow a later motif-able block
+unless the FloatRun is still strictly smaller than the motif/RLE encoding of that same span.
+
+`EstimateMotifRleSizeForSpan` is a faithful pure-size version of the live
+`EncodeXorWithMotifs` accumulator loop with the FloatRun probe removed:
+
+- same inactive starting state;
+- same `TryExtend` before `ShouldEmit`;
+- same `ShouldEmit` threshold and `MotifEmitSize` framing;
+- same reset behavior when a motif cannot be extended and is not worth emitting;
+- same `TryStart` probe order through the live `MotifAccumulator`;
+- same ZeroRun/NonZeroRun fallback sizing; and
+- same trailing active-motif flush.
+
+For this gate, the unsafe estimator error would be over-counting the motif/RLE alternative,
+because that could make `floatSize < motifRleSize` true when the real motif/RLE path was
+actually cheaper. I found no over-count: `MotifEmitSize` matches `EmitMotif`'s opcode, flags,
+repeat varint, unit varint, optional mask varint, and packed data length; fallback RLE sizing
+matches `DeltaUtils.EstimateRLESizeForSpan` and the live fallback writer.
+
+### B. Test047 and Test046
+
+APPROVED. `Test047_FloatRun_YieldsToMidSpanMotif` is a real TestGen vector, registered in
+`Program.cs`, with the adversarial 416-byte XOR shape: byte 0 changed, bytes 4-15 zero, and
+100 repeats of `AA 00 00 00` beginning at byte 16. Static sizing confirms the repaired gate:
+the old FloatRun candidate is 420 payload bytes, while the motif/RLE alternative is
+`NonZeroRun(1) + ZeroRun(15) + UniformMotif(100)` = 11 payload bytes, so the 5-byte delta
+header makes the expected total 16 bytes and `FloatPatternCount` remains 0.
+
+Test046 remains the legitimate FloatRun win. The new estimator does not cap on a mere
+`TryStart`; it prices the whole motif/RLE alternative. That preserves the stride-12 float
+case where short mid-span motif starts are not a net win, leaving the `06 00 FE 05`
+FloatRun and 1131-byte result unchanged per the orchestrator run.
+
+Non-blocking note: the Test047 source comment still says "caps before the first motif-able
+byte position", but the actual implementation and remediation appendix use approach (b):
+yield only when the priced motif/RLE alternative beats FloatRun.
+
+### C. C#<->Zig estimator faithfulness
+
+APPROVED. The new Zig `motifEmitSize`, `estimateMotifRleSizeForSpan`, and FloatRun gate
+match the C# source of truth:
+
+- same `MotifAccumulator` fields and lifecycle;
+- same unit probe order 2..8 and density pruning;
+- same full/uniform and masked/varying checks;
+- same `shouldEmit` size arithmetic and `-0.1` threshold;
+- same motif emit-size formula;
+- same fallback RLE run accounting; and
+- same strict `floatSize >= rleSize` / `floatSize >= motif_rle_size` rejection tests.
+
+I did not find a C#<->Zig divergence risk in the new estimator. One stale Zig header comment
+still summarizes FloatRun as byte-RLE gated only, but the executable gate and local comments
+below it are motif-aware.
+
+### D. Decode, scope, no-papering
+
+APPROVED. `git diff be41783..6df1ac4` is bounded to the expected files:
+`Encoder.cs`, `encoder.zig`, `Program.cs`, new `Test047...cs`, and this execution log.
+There are no decoder, utils, 0x07, or 0x08 changes in the remediation diff. The 0x06 wire
+format is unchanged; this is encode-side selection only. `git diff --check` reported no
+whitespace errors. I found no weakened or skipped vector in the remediation diff.
+
+Approach (a) was explicitly rejected in the remediation notes for the right reason:
+`TryStart` success is not equivalent to a profitable motif. Approach (b), pricing the live
+motif/RLE alternative, is the sound fix for the prior REJECT.
+
+### E. Independent rerun
+
+APPROVED. I relied on the orchestrator-confirmed clean runs as requested: C#
+`dotnet test src/csharp/DeltaZorTests/DeltaZorTests.csproj --no-restore -m:1` with
+101 passed / 0 failed / 10 skipped, and Zig 0.15.1 `zig build test` EXIT=0 with 46
+create-delta vectors byte-identical C#<->Zig plus exact round-trip, including Test046 and
+Test047. I did not run any restoring `dotnet` command.
+
+### VERDICT
+
+**APPROVED.** Codex's prior REJECT is resolved. FloatRun 0x06 is now a motif-aware strict
+improvement gate over the live byte-RLE/motif alternative for the candidate span, and the
+new C# and Zig implementations preserve EPIC-0044 byte parity on the orchestrator-verified
+corpus. Orchestrator may merge `task-0361-floatrun-0x06` to `main` and close TASK-0361.
