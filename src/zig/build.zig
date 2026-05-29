@@ -46,7 +46,11 @@ pub fn build(b: *std.Build) void {
         // Always regenerate the corpus from the CURRENT C# encoder. Skipping when a
         // manifest exists let the Zig corpus go stale relative to a changed C# encoder,
         // which masks create-delta byte-parity regressions (EPIC-0044 / TASK-0429).
-        "echo Regenerating test data from current C# encoder... && cd ..\\..\\src\\csharp && dotnet build DeltaZor.TestGen\\DeltaZor.TestGen.csproj && dotnet run --project DeltaZor.TestGen\\DeltaZor.TestGen.csproj && if not exist ..\\..\\src\\zig\\testdata mkdir ..\\..\\src\\zig\\testdata && xcopy /E /I DeltaZor.TestGen\\bin\\Debug\\net10.0\\testdata\\* ..\\..\\src\\zig\\testdata\\ /Y && cd ..\\..\\src\\zig",
+        // --no-restore is MANDATORY: restoring hangs on the Astn feed (see TASK-0363 exec log),
+        // and without it the build silently used a STALE TestGen assembly, regenerating an
+        // out-of-date corpus that masked C#<->Zig divergence. Build DeltaZor.csproj first so the
+        // TestGen reference resolves to the CURRENT encoder, then run TestGen, then copy.
+        "echo Regenerating test data from current C# encoder... && cd ..\\..\\src\\csharp && dotnet build DeltaZor\\DeltaZor.csproj --no-restore -m:1 && dotnet build DeltaZor.TestGen\\DeltaZor.TestGen.csproj --no-restore -m:1 && dotnet run --project DeltaZor.TestGen\\DeltaZor.TestGen.csproj --no-restore -m:1 && if not exist ..\\..\\src\\zig\\testdata mkdir ..\\..\\src\\zig\\testdata && xcopy /E /I DeltaZor.TestGen\\bin\\Debug\\net10.0\\testdata\\* ..\\..\\src\\zig\\testdata\\ /Y && cd ..\\..\\src\\zig",
     });
     generate_testdata.has_side_effects = true;
     generate_testdata.setName("generate-testdata");

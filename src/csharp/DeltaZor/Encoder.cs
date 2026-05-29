@@ -336,6 +336,21 @@ public static class DeltaEncoder
                 continue;
             }
 
+            // Try a ChannelRun (0x08) FIRST: channel-interleaved byte run at a stride GREATER than
+            // the motif unit cap (8) — the gap motif cannot reach — where a fixed small set of byte
+            // channels changes per unit. Probed BEFORE HalfRun/FloatRun because it carries the most
+            // complete gate: it emits ONLY when strictly smaller than byte-RLE, motif/RLE, FloatRun
+            // AND HalfRun over the span. So it pre-empts Half/Float only when genuinely cheaper, and
+            // otherwise declines (channelSize >= the cheaper alternative), letting Half/Float probe
+            // next — deterministic coexistence with no double-fire and no regression. See
+            // TryEmitChannelRun (source of truth; mirrored by Zig encoder.zig tryEmitChannelRun).
+            // TASK-0363 / EPIC-0045.
+            if (TryEmitChannelRun(xorData, pos, writer, tempBuffer, ref counts, out int channelCovered))
+            {
+                pos += channelCovered;
+                continue;
+            }
+
             // Try a HalfRun (0x07): float16 (2-byte) lane sparse run, probed BEFORE FloatRun
             // (0x06). Its motif-aware gate also beats the FloatRun alternative, so it only
             // fires on genuinely 2-byte-granular shapes and yields (declines) to FloatRun on
@@ -603,6 +618,41 @@ public static class DeltaEncoder
         return true;
     }
 
+    // Pure size counter: the byte cost a HalfRun (0x07) would emit over a span anchored at
+    // stream position `pos` (the same span a candidate ChannelRun covers). Returns int.MaxValue
+    // ("infeasible") when HalfRun cannot represent the span identically — i.e. when `pos` is not
+    // 2-aligned, the span length is not a multiple of 2, the span holds < 2 float16 lanes, or the
+    // first half-lane is not changed (HalfRun requires a changed first lane). This is the HalfRun
+    // term of the ChannelRun gate so a ChannelRun never undercuts (steals) a position HalfRun
+    // would encode at least as cheaply. Never writes bytes. Mirrors EstimateFloatRunSizeForSpan
+    // exactly at 2-byte granularity; mirrored byte-for-byte by Zig encoder.zig
+    // estimateHalfRunSizeForSpan. (TASK-0363.)
+    private static int EstimateHalfRunSizeForSpan(ReadOnlySpan<byte> span, int pos)
+    {
+        const int LaneSize = 2;
+        if ((pos & 1) != 0) return int.MaxValue;          // HalfRun needs a 2-aligned start
+        if ((span.Length & 1) != 0) return int.MaxValue;  // HalfRun covers whole 2B lanes
+        int maxLanes = span.Length / LaneSize;
+        if (maxLanes < 2) return int.MaxValue;            // HalfRun needs >= 2 lanes
+        if (!HalfLaneChanged(span, 0)) return int.MaxValue; // HalfRun requires first lane changed
+
+        int changedLanes = 0;
+        int lastChanged = -1;
+        for (int l = 0; l < maxLanes; l++)
+        {
+            if (HalfLaneChanged(span, l * LaneSize))
+            {
+                changedLanes++;
+                lastChanged = l;
+            }
+        }
+
+        int laneCount = lastChanged + 1; // HalfRun trims trailing zero lanes
+        if (laneCount < 2) return int.MaxValue;
+        int bitmapBytes = (laneCount + 7) / 8;
+        return 1 + 1 + DeltaUtils.Get7BitEncodedSize(laneCount) + bitmapBytes + LaneSize * changedLanes;
+    }
+
     private static bool HalfLaneChanged(ReadOnlySpan<byte> xorData, int baseOff) =>
         xorData[baseOff] != 0 || xorData[baseOff + 1] != 0;
 
@@ -732,6 +782,133 @@ public static class DeltaEncoder
         counts.HalfPatternCount++;
         covered = span;
         return true;
+    }
+
+    // ChannelRun stride probe set: strides STRICTLY GREATER than the motif unit cap (8), where
+    // the existing motif opcode can never lock. Probe order is the deterministic selection order
+    // (12 and 16 — common interleaved record widths — first). Source of truth; mirrored by Zig
+    // encoder.zig channel_run_strides.
+    private static readonly int[] ChannelRunStrides = { 12, 16, 9, 10, 11, 13, 14, 15 };
+
+    // ChannelRun 0x08 probe + emit. SINGLE SOURCE OF TRUTH for the channel-interleaved opcode;
+    // mirrored byte-for-byte by Zig encoder.zig tryEmitChannelRun. Framing:
+    //   [0x08][flags=0x00][stride:1][channelMask: ceil(stride/8), LSB-first][unitCount:7bit][packed: popcount(mask)*unitCount]
+    // Targets channel-interleaved byte data with a stride GREATER than the motif unit cap (8) —
+    // the precise gap motif leaves — where a fixed, small set of byte channels changes per unit,
+    // each by a distinct value. Probed AFTER HalfRun (0x07) and FloatRun (0x06) in the basic-RLE
+    // fallback branch. For each candidate stride S (ChannelRunStrides), derives the changed-channel
+    // mask from the first unit at pos, extends over consecutive units whose changed bytes match the
+    // SAME mask (every masked offset nonzero, every unmasked offset zero — varying-motif discipline
+    // at stride > 8), and trims to the last matching unit. ALL-OPCODE-AWARE gate (TASK-0361 lesson):
+    // emits ONLY when channelSize is strictly smaller than ALL of byte-RLE, the live motif/RLE cost
+    // (EstimateMotifRleSizeForSpan), the FloatRun alternative (EstimateFloatRunSizeForSpan), AND the
+    // HalfRun alternative (EstimateHalfRunSizeForSpan) over the same span. Strict improvement or
+    // no-op — never a regression; yields to motif on stride <= 8 shapes (those never enter the probe
+    // set) and to whichever of RLE/motif/Float/Half is cheaper on any span. (TASK-0363.)
+    private static bool TryEmitChannelRun(ReadOnlySpan<byte> xorData, int pos, IBufferWriter<byte> writer,
+        Span<byte> tempBuffer, ref DeltaZor.OpCodeCounts counts, out int covered)
+    {
+        covered = 0;
+        int avail = xorData.Length - pos;
+
+        foreach (int stride in ChannelRunStrides)
+        {
+            if (avail < 2 * stride) continue; // need at least 2 whole units
+
+            // Derive the channel mask from the first unit at pos.
+            uint mask = 0;
+            int changedChannels = 0;
+            for (int c = 0; c < stride; c++)
+            {
+                if (xorData[pos + c] != 0)
+                {
+                    mask |= (1u << c);
+                    changedChannels++;
+                }
+            }
+            if (changedChannels == 0) continue; // empty first unit — anchor must be non-empty
+
+            // Extend over consecutive units whose changed bytes match the SAME mask exactly.
+            int maxUnits = avail / stride;
+            int unitCount = 1;
+            for (int u = 1; u < maxUnits; u++)
+            {
+                int baseOff = pos + u * stride;
+                bool matches = true;
+                for (int c = 0; c < stride; c++)
+                {
+                    bool isSet = (mask & (1u << c)) != 0;
+                    if (isSet)
+                    {
+                        if (xorData[baseOff + c] == 0) { matches = false; break; }
+                    }
+                    else
+                    {
+                        if (xorData[baseOff + c] != 0) { matches = false; break; }
+                    }
+                }
+                if (!matches) break;
+                unitCount++;
+            }
+            if (unitCount < 2) continue;
+
+            int span = unitCount * stride;
+            int channelMaskBytes = (stride + 7) / 8;
+            int channelSize = 1 + 1 + 1 + channelMaskBytes + DeltaUtils.Get7BitEncodedSize(unitCount)
+                              + changedChannels * unitCount;
+
+            ReadOnlySpan<byte> spanSlice = xorData.Slice(pos, span);
+            int rleSize = DeltaUtils.EstimateRLESizeForSpan(spanSlice);
+            if (channelSize >= rleSize) continue; // strict improvement vs byte-RLE
+            int motifRleSize = EstimateMotifRleSizeForSpan(spanSlice);
+            if (channelSize >= motifRleSize) continue; // strict improvement vs motif/RLE
+            int floatSize = EstimateFloatRunSizeForSpan(spanSlice, pos);
+            if (channelSize >= floatSize) continue; // strict improvement vs FloatRun
+            int halfSize = EstimateHalfRunSizeForSpan(spanSlice, pos);
+            if (channelSize >= halfSize) continue; // strict improvement vs HalfRun
+
+            // Emit opcode + flags + stride.
+            Span<byte> oneByteSpan = stackalloc byte[1];
+            oneByteSpan[0] = DeltaUtils.RLE_ChannelRun;
+            writer.Write(oneByteSpan);
+            oneByteSpan[0] = 0x00; // flags reserved
+            writer.Write(oneByteSpan);
+            oneByteSpan[0] = (byte)stride;
+            writer.Write(oneByteSpan);
+
+            // Channel mask (LSB-first per byte).
+            Span<byte> channelMask = stackalloc byte[channelMaskBytes];
+            channelMask.Clear();
+            for (int c = 0; c < stride; c++)
+            {
+                if ((mask & (1u << c)) != 0)
+                    channelMask[c >> 3] |= (byte)(1 << (c & 7));
+            }
+            writer.Write(channelMask);
+
+            DeltaUtils.Write7BitEncodedInt(writer, unitCount);
+
+            // Pack the changed bytes, unit-major then channel-order.
+            int dataLen = changedChannels * unitCount;
+            Span<byte> packed = dataLen <= tempBuffer.Length ? tempBuffer[..dataLen] : new byte[dataLen];
+            int cursor = 0;
+            for (int u = 0; u < unitCount; u++)
+            {
+                int baseOff = pos + u * stride;
+                for (int c = 0; c < stride; c++)
+                {
+                    if ((mask & (1u << c)) != 0)
+                        packed[cursor++] = xorData[baseOff + c];
+                }
+            }
+            writer.Write(packed);
+
+            counts.ChannelRunCount++;
+            covered = span;
+            return true;
+        }
+
+        return false;
     }
 
     public static DeltaZor.OpCodeCounts CreateRLEDelta(ReadOnlySpan<byte> oldData, ReadOnlySpan<byte> newData,

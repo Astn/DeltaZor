@@ -209,6 +209,36 @@ public static class DeltaDecoder
                 }
                     break;
 
+                case DeltaUtils.RLE_ChannelRun:
+                {
+                    // ChannelRun 0x08: [flags][stride:1][channelMask: ceil(stride/8)][unitCount:7bit][packed: popcount(mask)*unitCount]
+                    // Mirrors Encoder.cs TryEmitChannelRun (source of truth).
+                    if (!reader.TryReadByte(out byte channelFlags)) return false;
+                    if (channelFlags != 0x00) return false; // reserved flags must be zero
+                    if (!reader.TryReadByte(out byte strideByte)) return false;
+                    int stride = strideByte;
+                    if (stride < 1) return false;
+                    int channelMaskBytes = (stride + 7) / 8;
+                    ReadOnlySpan<byte> channelMask = reader.Read(channelMaskBytes);
+                    if (!reader.TryRead7BitEncodedInt(out int unitCount)) return false;
+                    if (unitCount < 2) return false;
+                    int span = unitCount * stride;
+                    if (pos + span > output.Length) return false;
+
+                    for (int u = 0; u < unitCount; u++)
+                    {
+                        int baseOff = pos + u * stride;
+                        for (int c = 0; c < stride; c++)
+                        {
+                            if ((channelMask[c >> 3] & (1 << (c & 7))) == 0) continue;
+                            if (!reader.TryReadByte(out byte b)) return false;
+                            output[baseOff + c] ^= b;
+                        }
+                    }
+                    pos += span;
+                }
+                    break;
+
                 default:
                     return false; // Invalid opcode
             }

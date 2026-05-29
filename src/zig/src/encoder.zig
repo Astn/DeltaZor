@@ -288,6 +288,17 @@ fn encodeXorWithMotifsDirect(xor_data: []const u8, buffer: []u8, data_pos: *usiz
             continue;
         }
 
+        // Try a ChannelRun (0x08) FIRST: channel-interleaved byte run at a stride > the motif
+        // unit cap (8) — the gap motif cannot reach. Its all-opcode-aware gate (beats byte-RLE,
+        // motif/RLE, FloatRun AND HalfRun over the span) lets it pre-empt Half/Float only when
+        // genuinely cheaper; otherwise it declines and Half/Float probe next. Mirrors C#
+        // Encoder.cs TryEmitChannelRun (source of truth) byte-for-byte. TASK-0363 / EPIC-0045.
+        var channel_covered: usize = 0;
+        if (tryEmitChannelRun(xor_data, pos, buffer, data_pos, counts, &channel_covered)) {
+            pos += channel_covered;
+            continue;
+        }
+
         // Try a HalfRun (0x07): float16 (2-byte) lane sparse run, probed BEFORE FloatRun.
         // Its gate also beats the FloatRun alternative, so it fires only on genuinely 2-byte-
         // granular shapes and yields to FloatRun on 4-byte-dense shapes. Mirrors C# Encoder.cs
@@ -500,6 +511,37 @@ fn estimateFloatRunSizeForSpan(span: []const u8, pos: usize) usize {
     return 1 + 1 + get7BitEncodedSize(lane_count) + bitmap_bytes + lane_size * changed_lanes;
 }
 
+// Pure size counter: the byte cost a HalfRun (0x07) would emit over a span anchored at stream
+// position `pos` (the same span a candidate ChannelRun covers). Returns the sentinel
+// std.math.maxInt(usize) ("infeasible") when HalfRun cannot represent the span identically (pos
+// not 2-aligned, span length not a multiple of 2, < 2 half lanes, or first half-lane not changed).
+// This is the HalfRun term of the ChannelRun gate. Mirrors C# Encoder.cs EstimateHalfRunSizeForSpan
+// (source of truth) byte-for-byte. Never writes bytes. (TASK-0363.)
+fn estimateHalfRunSizeForSpan(span: []const u8, pos: usize) usize {
+    const lane_size: usize = 2;
+    const infeasible = std.math.maxInt(usize);
+    if ((pos & 1) != 0) return infeasible;
+    if ((span.len & 1) != 0) return infeasible;
+    const max_lanes = span.len / lane_size;
+    if (max_lanes < 2) return infeasible;
+    if (!halfLaneChanged(span, 0)) return infeasible;
+
+    var changed_lanes: usize = 0;
+    var last_changed: i64 = -1;
+    var l: usize = 0;
+    while (l < max_lanes) : (l += 1) {
+        if (halfLaneChanged(span, l * lane_size)) {
+            changed_lanes += 1;
+            last_changed = @intCast(l);
+        }
+    }
+
+    const lane_count: usize = @intCast(last_changed + 1);
+    if (lane_count < 2) return infeasible;
+    const bitmap_bytes = (lane_count + 7) / 8;
+    return 1 + 1 + get7BitEncodedSize(lane_count) + bitmap_bytes + lane_size * changed_lanes;
+}
+
 // HalfRun 0x07 probe + emit. Mirrors C# Encoder.cs TryEmitHalfRun (SINGLE SOURCE OF TRUTH).
 // Framing:
 //   [0x07][flags=0x00][laneCount:7bit][laneBitmap: ceil(laneCount/8)][packedXor: 2*changedLanes]
@@ -574,6 +616,122 @@ fn tryEmitHalfRun(xor_data: []const u8, pos: usize, buffer: []u8, data_pos: *usi
     counts.half_pattern_count += 1;
     covered.* = span;
     return true;
+}
+
+// ChannelRun stride probe set: strides STRICTLY GREATER than the motif unit cap (8), where the
+// existing motif opcode can never lock. Probe order is the deterministic selection order. Mirrors
+// C# Encoder.cs ChannelRunStrides (source of truth) exactly.
+const channel_run_strides = [_]usize{ 12, 16, 9, 10, 11, 13, 14, 15 };
+
+// ChannelRun 0x08 probe + emit. Mirrors C# Encoder.cs TryEmitChannelRun (SINGLE SOURCE OF TRUTH).
+// Framing:
+//   [0x08][flags=0x00][stride:1][channelMask: ceil(stride/8), LSB-first][unitCount:7bit][packed: popcount(mask)*unitCount]
+// Targets channel-interleaved byte data with a stride GREATER than the motif unit cap (8) — the
+// gap motif leaves — where a fixed small set of byte channels changes per unit, each by a distinct
+// value. Probed BEFORE HalfRun/FloatRun because it carries the most complete gate: emits ONLY when
+// channelSize is strictly smaller than ALL of byte-RLE, the live motif/RLE cost, the FloatRun
+// alternative AND the HalfRun alternative over the same span. Pre-empts Half/Float only when
+// genuinely cheaper; otherwise declines (no double-fire, no regression).
+fn tryEmitChannelRun(xor_data: []const u8, pos: usize, buffer: []u8, data_pos: *usize, counts: *utils.OpCodeCounts, covered: *usize) bool {
+    covered.* = 0;
+    const avail = xor_data.len - pos;
+
+    for (channel_run_strides) |stride| {
+        if (avail < 2 * stride) continue; // need at least 2 whole units
+
+        // Derive the channel mask from the first unit at pos.
+        var mask: u32 = 0;
+        var changed_channels: usize = 0;
+        var c: usize = 0;
+        while (c < stride) : (c += 1) {
+            if (xor_data[pos + c] != 0) {
+                mask |= bit_masks[c];
+                changed_channels += 1;
+            }
+        }
+        if (changed_channels == 0) continue; // empty first unit — anchor must be non-empty
+
+        // Extend over consecutive units whose changed bytes match the SAME mask exactly.
+        const max_units = avail / stride;
+        var unit_count: usize = 1;
+        var u: usize = 1;
+        while (u < max_units) : (u += 1) {
+            const base_off = pos + u * stride;
+            var matches = true;
+            c = 0;
+            while (c < stride) : (c += 1) {
+                const is_set = (mask & bit_masks[c]) != 0;
+                if (is_set) {
+                    if (xor_data[base_off + c] == 0) {
+                        matches = false;
+                        break;
+                    }
+                } else {
+                    if (xor_data[base_off + c] != 0) {
+                        matches = false;
+                        break;
+                    }
+                }
+            }
+            if (!matches) break;
+            unit_count += 1;
+        }
+        if (unit_count < 2) continue;
+
+        const span = unit_count * stride;
+        const channel_mask_bytes = (stride + 7) / 8;
+        const channel_size = 1 + 1 + 1 + channel_mask_bytes + get7BitEncodedSize(unit_count) + changed_channels * unit_count;
+
+        const span_slice = xor_data[pos .. pos + span];
+        const rle_size = estimateRLESizeForSpan(span_slice);
+        if (channel_size >= rle_size) continue; // strict improvement vs byte-RLE
+        const motif_rle_size = estimateMotifRleSizeForSpan(span_slice);
+        if (channel_size >= motif_rle_size) continue; // strict improvement vs motif/RLE
+        const float_size = estimateFloatRunSizeForSpan(span_slice, pos);
+        if (channel_size >= float_size) continue; // strict improvement vs FloatRun
+        const half_size = estimateHalfRunSizeForSpan(span_slice, pos);
+        if (channel_size >= half_size) continue; // strict improvement vs HalfRun
+
+        // Emit opcode + flags + stride.
+        buffer[data_pos.*] = utils.RLE_CHANNEL_RUN;
+        data_pos.* += 1;
+        buffer[data_pos.*] = 0x00; // flags reserved
+        data_pos.* += 1;
+        buffer[data_pos.*] = @intCast(stride);
+        data_pos.* += 1;
+
+        // Channel mask (LSB-first per byte).
+        const mask_start = data_pos.*;
+        @memset(buffer[mask_start .. mask_start + channel_mask_bytes], 0);
+        c = 0;
+        while (c < stride) : (c += 1) {
+            if ((mask & bit_masks[c]) != 0) {
+                buffer[mask_start + (c >> 3)] |= @as(u8, 1) << @intCast(c & 7);
+            }
+        }
+        data_pos.* += channel_mask_bytes;
+
+        write7BitEncodedIntDirect(buffer, data_pos, unit_count);
+
+        // Pack the changed bytes, unit-major then channel-order.
+        u = 0;
+        while (u < unit_count) : (u += 1) {
+            const base_off = pos + u * stride;
+            c = 0;
+            while (c < stride) : (c += 1) {
+                if ((mask & bit_masks[c]) != 0) {
+                    buffer[data_pos.*] = xor_data[base_off + c];
+                    data_pos.* += 1;
+                }
+            }
+        }
+
+        counts.channel_run_count += 1;
+        covered.* = span;
+        return true;
+    }
+
+    return false;
 }
 
 fn createRLEDeltaDirect(old_data: []const u8, new_data: []const u8, buffer: []u8, data_pos: *usize, options: utils.Options, counts: *utils.OpCodeCounts) void {

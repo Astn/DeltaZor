@@ -152,12 +152,16 @@ namespace DZ.Tests.UnitTests
             Console.WriteLine($"UsedRLE: {stats.UsedRLE}");
             Console.WriteLine($"CompressionType: {stats.CompressionType}");
             
-            // We should have some pattern counts since we have changes. The exact opcode
-            // mix may include a FloatRun (0x06): this 100-byte buffer with 10 single-byte
-            // changes every 10 bytes is encoded as a strict-win FloatRun (float32-lane
-            // sparse run), so accept any tracked RLE-stream opcode, not just Zero/NonZero.
+            // We should have some pattern counts since we have changes. The exact opcode mix is
+            // NOT the contract: this 100-byte buffer with 10 single-byte changes every 10 bytes is
+            // a channel-interleaved shape (stride 10 > motif cap 8) now encoded as a strict-win
+            // ChannelRun (0x08); earlier it was a FloatRun (0x06). Accept any tracked RLE-stream
+            // opcode — the UsedRLE/CompressionType contract below and the round-trip guards
+            // elsewhere are the real correctness checks. (TASK-0363; mirrors the TASK-0361/0362
+            // broadening for FloatRun/HalfRun.)
             Assert.True(stats.OpCodeCounts.NonZeroRunCount > 0 || stats.OpCodeCounts.ZeroRunCount > 0 ||
-                        stats.OpCodeCounts.FloatPatternCount > 0);
+                        stats.OpCodeCounts.FloatPatternCount > 0 || stats.OpCodeCounts.HalfPatternCount > 0 ||
+                        stats.OpCodeCounts.ChannelRunCount > 0);
             Assert.True(stats.UsedRLE);
             Assert.Equal("RLE", stats.CompressionType);
         }

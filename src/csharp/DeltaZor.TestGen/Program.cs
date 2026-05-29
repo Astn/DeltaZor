@@ -222,6 +222,10 @@ public class Program
             new Test048_HalfRun_SparseStride11_f16(),
             // TASK-0362 (gate guard): HalfRun must YIELD to FloatRun on 4-byte-dense shapes
             new Test049_HalfRun_YieldsToFloatRun(),
+            // TASK-0363: ChannelRun 0x08 — channel-interleaved byte run at a stride > motif cap (8)
+            new Test050_ChannelRun_Stride12_SingleChannel(),
+            // TASK-0363 (gate guard): ChannelRun must YIELD to motif on stride <= 8 channel data
+            new Test051_ChannelRun_YieldsToMotif(),
         };
 
         var manifest = new List<ManifestEntry>();

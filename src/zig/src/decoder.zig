@@ -258,6 +258,35 @@ pub fn applyDelta(old_data: []const u8, delta: []const u8, output: []u8, allocat
                         }
                         pos += span;
                     },
+                    utils.RLE_CHANNEL_RUN => { // channel run 0x08
+                        // [flags][stride:1][channelMask: ceil(stride/8)][unitCount:7bit][packed: popcount(mask)*unitCount]
+                        // Mirrors C# Encoder.cs TryEmitChannelRun (source of truth).
+                        const flags = try readByte(&reader_pos, data);
+                        if (flags != 0x00) return error.Invalid; // reserved flags must be zero
+                        const stride = try readByte(&reader_pos, data);
+                        if (stride < 1) return error.Invalid;
+                        const channel_mask_bytes = (@as(usize, stride) + 7) / 8;
+                        const mask_start = reader_pos;
+                        reader_pos += channel_mask_bytes;
+                        if (reader_pos > data.len) return error.EOF;
+                        const channel_mask = data[mask_start..reader_pos];
+                        const unit_count = try read7bit(&reader_pos, data);
+                        if (unit_count < 2) return error.Invalid;
+                        const span = unit_count * @as(usize, stride);
+                        if (pos + span > output.len) return error.Invalid;
+
+                        var u: usize = 0;
+                        while (u < unit_count) : (u += 1) {
+                            const base_off = pos + u * @as(usize, stride);
+                            var c: usize = 0;
+                            while (c < stride) : (c += 1) {
+                                if ((channel_mask[c >> 3] & (@as(u8, 1) << @intCast(c & 7))) == 0) continue;
+                                const b = try readByte(&reader_pos, data);
+                                output[base_off + c] ^= b;
+                            }
+                        }
+                        pos += span;
+                    },
                     else => return error.InvalidOpcode,
                 }
             }
