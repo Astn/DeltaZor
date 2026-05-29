@@ -218,6 +218,10 @@ public class Program
             new Test046_FloatRun_Stride12_f32(),
             // TASK-0361 (codex REJECT-B): FloatRun must YIELD to a mid-span motif (no swallow)
             new Test047_FloatRun_YieldsToMidSpanMotif(),
+            // TASK-0362: HalfRun 0x07 — sparse float16 (2-byte) lane run motif/RLE/FloatRun can't beat
+            new Test048_HalfRun_SparseStride11_f16(),
+            // TASK-0362 (gate guard): HalfRun must YIELD to FloatRun on 4-byte-dense shapes
+            new Test049_HalfRun_YieldsToFloatRun(),
         };
 
         var manifest = new List<ManifestEntry>();

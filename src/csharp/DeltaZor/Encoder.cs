@@ -336,6 +336,17 @@ public static class DeltaEncoder
                 continue;
             }
 
+            // Try a HalfRun (0x07): float16 (2-byte) lane sparse run, probed BEFORE FloatRun
+            // (0x06). Its motif-aware gate also beats the FloatRun alternative, so it only
+            // fires on genuinely 2-byte-granular shapes and yields (declines) to FloatRun on
+            // 4-byte-dense shapes. See TryEmitHalfRun (source of truth; mirrored by Zig
+            // encoder.zig tryEmitHalfRun). TASK-0362 / EPIC-0045.
+            if (TryEmitHalfRun(xorData, pos, writer, tempBuffer, ref counts, out int halfCovered))
+            {
+                pos += halfCovered;
+                continue;
+            }
+
             // Try a FloatRun (0x06): float32-lane sparse run that motifs (unit cap 8)
             // cannot reach. Only at a 4-aligned position and only when strictly smaller
             // than the equivalent byte-RLE. See Encoder.cs source-of-truth (mirrored by
@@ -588,6 +599,137 @@ public static class DeltaEncoder
         writer.Write(packed);
 
         counts.FloatPatternCount++;
+        covered = span;
+        return true;
+    }
+
+    private static bool HalfLaneChanged(ReadOnlySpan<byte> xorData, int baseOff) =>
+        xorData[baseOff] != 0 || xorData[baseOff + 1] != 0;
+
+    // Pure size counter: the byte cost a FloatRun (0x06) would emit over a span that starts
+    // at stream position `pos` and runs `span.Length` bytes (the same span a candidate
+    // HalfRun covers). Returns int.MaxValue ("infeasible") when FloatRun cannot represent the
+    // span identically — i.e. when `pos` is not 4-aligned, the span length is not a multiple
+    // of 4, the span holds < 2 float32 lanes, or the first float lane is not changed (FloatRun
+    // requires a changed first lane). This is the FloatRun term of the HalfRun gate so a
+    // HalfRun never undercuts (steals) a position FloatRun would encode more cheaply. Never
+    // writes bytes. Mirrored byte-for-byte by Zig encoder.zig estimateFloatRunSizeForSpan.
+    private static int EstimateFloatRunSizeForSpan(ReadOnlySpan<byte> span, int pos)
+    {
+        const int LaneSize = 4;
+        if ((pos & 3) != 0) return int.MaxValue;          // FloatRun needs a 4-aligned start
+        if ((span.Length & 3) != 0) return int.MaxValue;  // FloatRun covers whole 4B lanes
+        int maxLanes = span.Length / LaneSize;
+        if (maxLanes < 2) return int.MaxValue;            // FloatRun needs >= 2 lanes
+        if (!LaneChanged(span, 0)) return int.MaxValue;   // FloatRun requires first lane changed
+
+        int changedLanes = 0;
+        int lastChanged = -1;
+        for (int l = 0; l < maxLanes; l++)
+        {
+            if (LaneChanged(span, l * LaneSize))
+            {
+                changedLanes++;
+                lastChanged = l;
+            }
+        }
+
+        int laneCount = lastChanged + 1; // FloatRun trims trailing zero lanes
+        if (laneCount < 2) return int.MaxValue;
+        int bitmapBytes = (laneCount + 7) / 8;
+        return 1 + 1 + DeltaUtils.Get7BitEncodedSize(laneCount) + bitmapBytes + LaneSize * changedLanes;
+    }
+
+    // HalfRun 0x07 probe + emit. SINGLE SOURCE OF TRUTH for the half-float (float16) opcode;
+    // mirrored byte-for-byte by Zig encoder.zig tryEmitHalfRun. Framing:
+    //   [0x07][flags=0x00][laneCount:7bit][laneBitmap: ceil(laneCount/8)][packedXor: 2*changedLanes]
+    // Treats the XOR stream as float16 lanes (2-byte units aligned to the stream origin).
+    // Probed BEFORE FloatRun (0x06) in the basic-RLE fallback branch, at 2-aligned positions
+    // only. Targets SPARSE/STRIDED 2-byte-granular changed lanes that motifs (unit cap 8),
+    // byte-RLE, AND FloatRun (4-byte lanes) all encode poorly. Same first-lane-changed /
+    // trailing-zero-trim discipline as FloatRun, at 2-byte granularity:
+    //   (a) requires the FIRST half-lane at pos to be changed (leading zero lanes left to the
+    //       natural ZeroRun, which re-probes at the next changed lane);
+    //   (b) trims trailing zero lanes (laneCount = lastChangedLane + 1).
+    // MOTIF-AWARE + FloatRun-aware gate (TASK-0361 lesson, extended): emits ONLY when halfSize
+    // is strictly smaller than ALL of byte-RLE (EstimateRLESizeForSpan), the live motif/RLE
+    // encoder cost (EstimateMotifRleSizeForSpan), AND the FloatRun alternative
+    // (EstimateFloatRunSizeForSpan) over the same span. Strict improvement or no-op — never a
+    // regression, and never steals a position FloatRun/motif/RLE would encode at least as well
+    // (a 4-byte-dense shape has halfSize > floatSize so HalfRun declines and FloatRun fires).
+    private static bool TryEmitHalfRun(ReadOnlySpan<byte> xorData, int pos, IBufferWriter<byte> writer,
+        Span<byte> tempBuffer, ref DeltaZor.OpCodeCounts counts, out int covered)
+    {
+        covered = 0;
+        const int LaneSize = 2;
+        if ((pos & 1) != 0) return false; // require 2-aligned lane start
+        int avail = xorData.Length - pos;
+        int maxLanes = avail / LaneSize;
+        if (maxLanes < 2) return false; // need at least 2 lanes
+        if (!HalfLaneChanged(xorData, pos)) return false; // (a) no leading zero lanes
+
+        // Count changed lanes and find the last changed lane (to trim trailing zeros).
+        int changedLanes = 0;
+        int lastChanged = -1;
+        for (int l = 0; l < maxLanes; l++)
+        {
+            if (HalfLaneChanged(xorData, pos + l * LaneSize))
+            {
+                changedLanes++;
+                lastChanged = l;
+            }
+        }
+
+        int laneCount = lastChanged + 1; // (b) trim trailing zero lanes
+        if (laneCount < 2) return false;
+        int span = laneCount * LaneSize;
+
+        int bitmapBytes = (laneCount + 7) / 8;
+        int halfSize = 1 + 1 + DeltaUtils.Get7BitEncodedSize(laneCount) + bitmapBytes + LaneSize * changedLanes;
+        ReadOnlySpan<byte> spanSlice = xorData.Slice(pos, span);
+        int rleSize = DeltaUtils.EstimateRLESizeForSpan(spanSlice);
+        if (halfSize >= rleSize) return false; // strict improvement vs byte-RLE
+        int motifRleSize = EstimateMotifRleSizeForSpan(spanSlice);
+        if (halfSize >= motifRleSize) return false; // strict improvement vs motif/RLE
+        // FloatRun-aware gate: also beat what a FloatRun (0x06) would emit over the same span,
+        // so HalfRun yields to FloatRun on 4-byte-dense shapes (no double-fire, no regression).
+        int floatSize = EstimateFloatRunSizeForSpan(spanSlice, pos);
+        if (halfSize >= floatSize) return false; // strict improvement vs FloatRun too
+
+        // Emit opcode + flags + laneCount.
+        Span<byte> oneByteSpan = stackalloc byte[1];
+        oneByteSpan[0] = DeltaUtils.RLE_HalfRun;
+        writer.Write(oneByteSpan);
+        oneByteSpan[0] = 0x00; // flags reserved
+        writer.Write(oneByteSpan);
+        DeltaUtils.Write7BitEncodedInt(writer, laneCount);
+
+        // Build and write the lane bitmap (LSB-first per byte).
+        Span<byte> bitmap = bitmapBytes <= 512 ? stackalloc byte[bitmapBytes] : new byte[bitmapBytes];
+        bitmap.Clear();
+        for (int l = 0; l < laneCount; l++)
+        {
+            if (HalfLaneChanged(xorData, pos + l * LaneSize))
+                bitmap[l >> 3] |= (byte)(1 << (l & 7));
+        }
+        writer.Write(bitmap);
+
+        // Pack the 2 XOR bytes of each changed lane, in lane order.
+        int dataLen = LaneSize * changedLanes;
+        Span<byte> packed = dataLen <= tempBuffer.Length ? tempBuffer[..dataLen] : new byte[dataLen];
+        int cursor = 0;
+        for (int l = 0; l < laneCount; l++)
+        {
+            int baseOff = pos + l * LaneSize;
+            if (HalfLaneChanged(xorData, baseOff))
+            {
+                xorData.Slice(baseOff, LaneSize).CopyTo(packed.Slice(cursor, LaneSize));
+                cursor += LaneSize;
+            }
+        }
+        writer.Write(packed);
+
+        counts.HalfPatternCount++;
         covered = span;
         return true;
     }

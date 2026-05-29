@@ -167,6 +167,12 @@ const MotifAccumulator = struct {
 // basic-RLE fallback branch (after motif TryStart fails), at 4-aligned positions only,
 // gated to emit ONLY when strictly smaller than byte-RLE. Mirrors C# Encoder.cs
 // TryEmitFloatRun (source of truth). TASK-0361 / EPIC-0045.
+//
+// HalfRun (0x07): see tryEmitHalfRun below — a float16 (2-byte) lane sparse run probed in
+// the same fallback branch BEFORE FloatRun, at 2-aligned positions only, gated to emit ONLY
+// when strictly smaller than byte-RLE, the motif/RLE cost, AND the FloatRun alternative
+// (estimateFloatRunSizeForSpan). Mirrors C# Encoder.cs TryEmitHalfRun (source of truth).
+// TASK-0362 / EPIC-0045.
 // =====================================================================================
 const motif_density_threshold: f32 = 0.7; // DeltaUtils.MotifDensityThreshold
 const motif_savings_threshold: f32 = -0.1; // Encoder.cs ShouldEmit default savingsThreshold
@@ -279,6 +285,16 @@ fn encodeXorWithMotifsDirect(xor_data: []const u8, buffer: []u8, data_pos: *usiz
         // Try to start a new motif.
         if (motifs_enabled and acc.tryStart(xor_data, pos)) {
             pos += acc.unit_size;
+            continue;
+        }
+
+        // Try a HalfRun (0x07): float16 (2-byte) lane sparse run, probed BEFORE FloatRun.
+        // Its gate also beats the FloatRun alternative, so it fires only on genuinely 2-byte-
+        // granular shapes and yields to FloatRun on 4-byte-dense shapes. Mirrors C# Encoder.cs
+        // TryEmitHalfRun (source of truth) byte-for-byte. TASK-0362 / EPIC-0045.
+        var half_covered: usize = 0;
+        if (tryEmitHalfRun(xor_data, pos, buffer, data_pos, counts, &half_covered)) {
+            pos += half_covered;
             continue;
         }
 
@@ -445,6 +461,117 @@ fn tryEmitFloatRun(xor_data: []const u8, pos: usize, buffer: []u8, data_pos: *us
     }
 
     counts.float_pattern_count += 1;
+    covered.* = span;
+    return true;
+}
+
+fn halfLaneChanged(xor_data: []const u8, base_off: usize) bool {
+    return xor_data[base_off] != 0 or xor_data[base_off + 1] != 0;
+}
+
+// Pure size counter: the byte cost a FloatRun (0x06) would emit over a span anchored at
+// stream position `pos`. Returns the sentinel std.math.maxInt(usize) ("infeasible") when
+// FloatRun cannot represent the span identically (pos not 4-aligned, span length not a
+// multiple of 4, < 2 float lanes, or first float lane not changed). This is the FloatRun
+// term of the HalfRun gate. Mirrors C# Encoder.cs EstimateFloatRunSizeForSpan (source of
+// truth) byte-for-byte. Never writes bytes.
+fn estimateFloatRunSizeForSpan(span: []const u8, pos: usize) usize {
+    const lane_size: usize = 4;
+    const infeasible = std.math.maxInt(usize);
+    if ((pos & 3) != 0) return infeasible;
+    if ((span.len & 3) != 0) return infeasible;
+    const max_lanes = span.len / lane_size;
+    if (max_lanes < 2) return infeasible;
+    if (!laneChanged(span, 0)) return infeasible;
+
+    var changed_lanes: usize = 0;
+    var last_changed: i64 = -1;
+    var l: usize = 0;
+    while (l < max_lanes) : (l += 1) {
+        if (laneChanged(span, l * lane_size)) {
+            changed_lanes += 1;
+            last_changed = @intCast(l);
+        }
+    }
+
+    const lane_count: usize = @intCast(last_changed + 1);
+    if (lane_count < 2) return infeasible;
+    const bitmap_bytes = (lane_count + 7) / 8;
+    return 1 + 1 + get7BitEncodedSize(lane_count) + bitmap_bytes + lane_size * changed_lanes;
+}
+
+// HalfRun 0x07 probe + emit. Mirrors C# Encoder.cs TryEmitHalfRun (SINGLE SOURCE OF TRUTH).
+// Framing:
+//   [0x07][flags=0x00][laneCount:7bit][laneBitmap: ceil(laneCount/8)][packedXor: 2*changedLanes]
+// Treats the XOR stream as float16 lanes (2-byte units). Probed BEFORE FloatRun, at 2-aligned
+// positions. Requires first half-lane changed, trims trailing zero lanes, and is MOTIF-AWARE
+// + FloatRun-aware: emits ONLY when halfSize is strictly smaller than ALL of byte-RLE, the
+// live motif/RLE cost (estimateMotifRleSizeForSpan), AND the FloatRun alternative
+// (estimateFloatRunSizeForSpan) over the same span. Strict improvement or no-op.
+fn tryEmitHalfRun(xor_data: []const u8, pos: usize, buffer: []u8, data_pos: *usize, counts: *utils.OpCodeCounts, covered: *usize) bool {
+    covered.* = 0;
+    const lane_size: usize = 2;
+    if ((pos & 1) != 0) return false; // require 2-aligned lane start
+    const avail = xor_data.len - pos;
+    const max_lanes = avail / lane_size;
+    if (max_lanes < 2) return false; // need at least 2 lanes
+    if (!halfLaneChanged(xor_data, pos)) return false; // (a) no leading zero lanes
+
+    // Count changed lanes and find the last changed lane (to trim trailing zeros).
+    var changed_lanes: usize = 0;
+    var last_changed: i64 = -1;
+    var l: usize = 0;
+    while (l < max_lanes) : (l += 1) {
+        if (halfLaneChanged(xor_data, pos + l * lane_size)) {
+            changed_lanes += 1;
+            last_changed = @intCast(l);
+        }
+    }
+
+    const lane_count: usize = @intCast(last_changed + 1); // (b) trim trailing zero lanes
+    if (lane_count < 2) return false;
+    const span = lane_count * lane_size;
+
+    const bitmap_bytes = (lane_count + 7) / 8;
+    const half_size = 1 + 1 + get7BitEncodedSize(lane_count) + bitmap_bytes + lane_size * changed_lanes;
+    const span_slice = xor_data[pos .. pos + span];
+    const rle_size = estimateRLESizeForSpan(span_slice);
+    if (half_size >= rle_size) return false; // strict improvement vs byte-RLE
+    const motif_rle_size = estimateMotifRleSizeForSpan(span_slice);
+    if (half_size >= motif_rle_size) return false; // strict improvement vs motif/RLE
+    // FloatRun-aware gate: also beat what a FloatRun would emit over the same span.
+    const float_size = estimateFloatRunSizeForSpan(span_slice, pos);
+    if (half_size >= float_size) return false; // strict improvement vs FloatRun too
+
+    // Emit opcode + flags + laneCount.
+    buffer[data_pos.*] = utils.RLE_HALF_RUN;
+    data_pos.* += 1;
+    buffer[data_pos.*] = 0x00; // flags reserved
+    data_pos.* += 1;
+    write7BitEncodedIntDirect(buffer, data_pos, lane_count);
+
+    // Build + write the lane bitmap (LSB-first per byte).
+    const bitmap_start = data_pos.*;
+    @memset(buffer[bitmap_start .. bitmap_start + bitmap_bytes], 0);
+    l = 0;
+    while (l < lane_count) : (l += 1) {
+        if (halfLaneChanged(xor_data, pos + l * lane_size)) {
+            buffer[bitmap_start + (l >> 3)] |= @as(u8, 1) << @intCast(l & 7);
+        }
+    }
+    data_pos.* += bitmap_bytes;
+
+    // Pack the 2 XOR bytes of each changed lane, in lane order.
+    l = 0;
+    while (l < lane_count) : (l += 1) {
+        const base_off = pos + l * lane_size;
+        if (halfLaneChanged(xor_data, base_off)) {
+            @memcpy(buffer[data_pos.* .. data_pos.* + lane_size], xor_data[base_off .. base_off + lane_size]);
+            data_pos.* += lane_size;
+        }
+    }
+
+    counts.half_pattern_count += 1;
     covered.* = span;
     return true;
 }

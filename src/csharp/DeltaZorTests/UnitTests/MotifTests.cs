@@ -333,9 +333,17 @@ _output.WriteLine("Output: " + string.Join(", ", output));
             // Act
             var delta = DeltaZor.CreateDelta(oldData, newData, options, out var stats);
 
-            // Assert: No motif (exceeds cap)
+            // Assert: No motif (exceeds cap). The unit-33 change cannot lock a motif, so the
+            // encoder falls back to a non-motif opcode. The exact fallback opcode is not the
+            // contract: a 2-byte-aligned change is now legitimately encoded as a HalfRun (0x07)
+            // float16-lane run when it strictly beats byte-RLE/motif/FloatRun, so accept any
+            // tracked non-motif RLE-stream opcode (NonZeroRun, HalfRun, or FloatRun) — the
+            // round-trip assertion below is the real correctness guard. (TASK-0362; mirrors the
+            // TASK-0361 broadening of MotifRepeatTests for FloatRun.)
             Assert.Equal(0, stats.OpCodeCounts.UniformMotifCount + stats.OpCodeCounts.VaryingMotifCount);
-            Assert.True(stats.OpCodeCounts.NonZeroRunCount > 0);
+            Assert.True(stats.OpCodeCounts.NonZeroRunCount > 0 ||
+                        stats.OpCodeCounts.HalfPatternCount > 0 ||
+                        stats.OpCodeCounts.FloatPatternCount > 0);
 
             // Verify application
             var output = new byte[totalLength];

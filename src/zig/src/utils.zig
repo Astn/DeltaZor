@@ -95,6 +95,7 @@ pub const OpCodeCounts = struct {
     varying_motif_count: usize = 0,
     average_mask_density: f32 = 0.0,
     float_pattern_count: usize = 0,
+    half_pattern_count: usize = 0,
 };
 
 pub const RLE_ZERO_RUN: u8 = 0x00;
@@ -104,3 +105,4 @@ pub const RLE_TRUNCATION: u8 = 0x03;
 pub const RLE_UNIFORM_MOTIF_REPEAT: u8 = 0x04;
 pub const RLE_VARYING_MOTIF_REPEAT: u8 = 0x05;
 pub const RLE_FLOAT_RUN: u8 = 0x06;
+pub const RLE_HALF_RUN: u8 = 0x07;
