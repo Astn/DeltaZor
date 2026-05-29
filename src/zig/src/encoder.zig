@@ -6,21 +6,167 @@ const popCount32 = utils.popCount32;
 const get7BitEncodedSize = utils.get7BitEncodedSize;
 const write7BitEncodedIntDirect = utils.write7BitEncodedIntDirect;
 
-pub const MotifCandidate = struct {
-    unit_size: usize,
-    repeat_length: usize,
-    covered_length: usize,
-    mask: u32,
-    is_uniform: bool,
-    is_full: bool,
+// Stateful motif accumulator mirroring C# Encoder.cs MotifAccumulator. The encoder
+// extends an active motif one unit at a time (TryExtend), emitting it only when it
+// can no longer be extended (and ShouldEmit's savings test passes). This is the LIVE
+// C# algorithm; see the constants block above for the differences vs FindMotifCandidate.
+const MotifAccumulator = struct {
+    unit_size: usize = 0,
+    mask: u32 = 0,
+    streak: usize = 0,
+    is_uniform: bool = false,
+    is_full: bool = false,
+    changed_count: usize = 0,
+    density: f32 = 0.0,
+    start_pos: usize = 0,
+    active: bool = false,
+
+    fn reset(self: *MotifAccumulator) void {
+        self.active = false;
+        self.streak = 0;
+        self.start_pos = 0;
+    }
+
+    fn coveredLength(self: *const MotifAccumulator) usize {
+        return if (self.active) self.streak * self.unit_size else 0;
+    }
+
+    // Mirrors C# MotifAccumulator.TryStart (probes u=2..8 ascending).
+    fn tryStart(self: *MotifAccumulator, xor_data: []const u8, pos: usize) bool {
+        if (pos + motif_max_unit_size > xor_data.len) return false;
+
+        var u: usize = 2;
+        while (u <= motif_max_unit_size) : (u += 1) {
+            var mask: u32 = 0;
+            var pop: usize = 0;
+            var i: usize = 0;
+            while (i < u) : (i += 1) {
+                if (xor_data[pos + i] != 0) {
+                    mask |= bit_masks[i];
+                    pop += 1;
+                }
+            }
+            if (pop == 0) continue;
+
+            const is_full = pop == u;
+            const density = @as(f32, @floatFromInt(pop)) / @as(f32, @floatFromInt(u));
+            if (!is_full and density >= motif_density_threshold) continue; // prune high-density masked
+
+            if (pos + 2 * u > xor_data.len) continue; // need at least one repeat
+
+            // Check pattern consistency for the first repeat.
+            var matches = true;
+            if (is_full) {
+                matches = std.mem.eql(u8, xor_data[pos .. pos + u], xor_data[pos + u .. pos + 2 * u]);
+            } else {
+                i = 0;
+                while (i < u) : (i += 1) {
+                    const val = xor_data[pos + u + i];
+                    if ((mask & bit_masks[i]) != 0) {
+                        if (val == 0) {
+                            matches = false;
+                            break;
+                        }
+                    } else {
+                        if (val != 0) {
+                            matches = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!matches) continue;
+
+            const uniform = is_full or checkUniform(xor_data, pos, u, mask, 2);
+
+            self.unit_size = u;
+            self.mask = mask;
+            self.streak = 2;
+            self.is_uniform = uniform;
+            self.is_full = is_full;
+            self.changed_count = pop;
+            self.density = density;
+            self.start_pos = pos;
+            self.active = true;
+            return true;
+        }
+        return false;
+    }
+
+    // Mirrors C# MotifAccumulator.TryExtend (no MaxMotifStreak cap — unbounded growth).
+    fn tryExtend(self: *MotifAccumulator, xor_data: []const u8) bool {
+        if (!self.active) return false;
+
+        const next_start = self.start_pos + self.streak * self.unit_size;
+        if (next_start + self.unit_size > xor_data.len) return false;
+
+        if (self.is_full and self.is_uniform) {
+            if (!std.mem.eql(u8, xor_data[next_start .. next_start + self.unit_size], xor_data[self.start_pos .. self.start_pos + self.unit_size]))
+                return false;
+        } else {
+            var i: usize = 0;
+            while (i < self.unit_size) : (i += 1) {
+                const val = xor_data[next_start + i];
+                if ((self.mask & bit_masks[i]) != 0) {
+                    if (val == 0) return false;
+                } else {
+                    if (val != 0) return false;
+                }
+            }
+            if (!self.is_uniform and !self.is_full) {
+                if (!checkUniform(xor_data, self.start_pos, self.unit_size, self.mask, self.streak + 1))
+                    return false;
+            }
+        }
+
+        self.streak += 1;
+        return true;
+    }
+
+    // Mirrors C# MotifAccumulator.ShouldEmit (default savingsThreshold = -0.1).
+    fn shouldEmit(self: *const MotifAccumulator, xor_data: []const u8) bool {
+        if (!self.active or self.streak < motif_min_streak) return false;
+
+        const covered = self.coveredLength();
+        var header_size: usize = 1 + 1 + get7BitEncodedSize(self.streak) + get7BitEncodedSize(self.unit_size);
+        const data_size = self.changed_count * (if (self.is_uniform) @as(usize, 1) else self.streak);
+        const motif_size = if (self.is_full)
+            header_size + data_size
+        else blk: {
+            header_size += get7BitEncodedSize(@as(usize, @intCast(self.mask)));
+            break :blk header_size + data_size;
+        };
+
+        const rle_size = estimateRLESizeForSpan(xor_data[self.start_pos .. self.start_pos + covered]);
+        const savings = if (rle_size > 0)
+            (@as(f32, @floatFromInt(rle_size)) - @as(f32, @floatFromInt(motif_size))) / @as(f32, @floatFromInt(rle_size))
+        else
+            0.0;
+        return savings > motif_savings_threshold;
+    }
 };
 
-const motif_unit_sizes = [_]usize{4, 8, 2, 3, 5, 6, 7};
-const motif_probe_count: usize = 7;
-const motif_density_threshold: f32 = 0.7;
-const motif_savings_threshold: f32 = -0.5;
-const motif_min_streak: usize = 2;
-const max_motif_streak: usize = 50;
+// =====================================================================================
+// Motif/RLE encoding constants.
+//
+// SINGLE SOURCE OF TRUTH: these MUST stay byte-for-byte in sync with the C# encoder
+// (`src/csharp/DeltaZor/Utils.cs` DeltaUtils.* and `Encoder.cs` MotifAccumulator), or
+// create-delta byte-parity (EPIC-0044) regresses. See `zig build test` create-delta
+// byte-compare and `dotnet test DeltaZorTests` for the cross-language guard.
+//
+// The LIVE C# encoder is the `MotifAccumulator` (TryStart/TryExtend/ShouldEmit) in
+// Encoder.cs — NOT the dead `FindMotifCandidate` method. The accumulator algorithm
+// mirrored below differs from FindMotifCandidate in two ways that change emitted bytes:
+//   1. TryStart probes unit sizes 2..8 ASCENDING (picks the smallest viable unit),
+//      whereas FindMotifCandidate probed {4,8,2,3,5,6,7}.
+//   2. TryExtend grows the streak unbounded (no MaxMotifStreak cap), so a long
+//      repeat is emitted as ONE motif instead of being split at 50 units.
+//   3. ShouldEmit uses savings threshold -0.1 (C# ShouldEmit default), not -0.5.
+// =====================================================================================
+const motif_density_threshold: f32 = 0.7; // DeltaUtils.MotifDensityThreshold
+const motif_savings_threshold: f32 = -0.1; // Encoder.cs ShouldEmit default savingsThreshold
+const motif_min_streak: usize = 2; // DeltaUtils.MotifMinStreak
+const motif_max_unit_size: usize = 8; // MotifAccumulator.TryStart probes u=2..8 ascending
 
 
 fn writeXORDelta(old_data: []const u8, new_data: []const u8, output: []u8, start: usize, length: usize, options: utils.Options) void {
@@ -31,83 +177,117 @@ fn writeXORDelta(old_data: []const u8, new_data: []const u8, output: []u8, start
     }
 }
 
-fn encodeXorWithMotifsDirect(xor_data: []const u8, buffer: []u8, data_pos: *usize, options: utils.Options, counts: *utils.OpCodeCounts) void {
-    var pos: usize = 0;
+// Emit an accumulated motif into the output buffer. Mirrors C# Encoder.cs EmitMotif.
+fn emitMotif(acc: *const MotifAccumulator, xor_data: []const u8, buffer: []u8, data_pos: *usize, counts: *utils.OpCodeCounts) void {
     var temp_buffer: [4096]u8 = undefined;
     var pos_list: [32]usize = undefined;
-    while (pos < xor_data.len) {
-        if (options.enable_motif_detection) {
-            if (findMotifCandidate(xor_data, pos, options)) |candidate| {
-                const c = candidate;
-                const is_uniform = c.is_uniform;
-                const is_full = c.is_full;
-                const msk = c.mask;
-                const unit = c.unit_size;
-                const reps = c.repeat_length;
-                const changed = if (is_full) unit else popCount32(msk);
-                const opcode = if (is_uniform) utils.RLE_UNIFORM_MOTIF_REPEAT else utils.RLE_VARYING_MOTIF_REPEAT;
-                buffer[data_pos.*] = opcode;
-                data_pos.* += 1;
-                const flags = if (is_full) @as(u8, 0x00) else @as(u8, 0x80);
-                buffer[data_pos.*] = flags;
-                data_pos.* += 1;
-                write7BitEncodedIntDirect(buffer, data_pos, reps);
-                write7BitEncodedIntDirect(buffer, data_pos, unit);
-                if (!is_full) {
-                    write7BitEncodedIntDirect(buffer, data_pos, @as(usize, @intCast(msk)));
-                }
-                const data_len = changed * (if (is_uniform) 1 else reps);
-                if (data_len > temp_buffer.len) @panic("temp buffer too small for motif data");
-                if (is_full) {
-                    @memcpy(temp_buffer[0..data_len], xor_data[pos..pos + data_len]);
-                } else {
-                    var pp: usize = 0;
-                    var ii: usize = 0;
-                    while (ii < unit) : (ii += 1) {
-                        if ((msk & bit_masks[ii]) != 0) {
-                            pos_list[pp] = ii;
-                            pp += 1;
-                        }
-                    }
-                    var cursor: usize = 0;
-                    const max_rr = if (is_uniform) 1 else reps;
-                    var rr: usize = 0;
-                    while (rr < max_rr) : (rr += 1) {
-                        var jj: usize = 0;
-                        while (jj < changed) : (jj += 1) {
-                            const local_pos = pos_list[jj];
-                            temp_buffer[cursor] = xor_data[pos + rr * unit + local_pos];
-                            cursor += 1;
-                        }
-                    }
-                }
-                @memcpy(buffer[data_pos.*..data_pos.* + data_len], temp_buffer[0..data_len]);
-                data_pos.* += data_len;
-                // update counts
-                const density = if (is_full) 1.0 else @as(f32, @floatFromInt(changed)) / @as(f32, @floatFromInt(unit));
-                const total_motif = counts.uniform_motif_count + counts.varying_motif_count + 1;
-                const new_avg = if (total_motif > 0) (counts.average_mask_density * @as(f32, @floatFromInt(total_motif - 1)) + density) / @as(f32, @floatFromInt(total_motif)) else 0.0;
-                if (is_uniform) {
-                    counts.uniform_motif_count += 1;
-                } else {
-                    counts.varying_motif_count += 1;
-                }
-                counts.average_mask_density = new_avg;
-                pos += c.covered_length;
-                continue;
+
+    const is_uniform = acc.is_uniform;
+    const is_full = acc.is_full;
+    const msk = acc.mask;
+    const unit = acc.unit_size;
+    const reps = acc.streak;
+    const changed = acc.changed_count;
+
+    const opcode = if (is_uniform) utils.RLE_UNIFORM_MOTIF_REPEAT else utils.RLE_VARYING_MOTIF_REPEAT;
+    buffer[data_pos.*] = opcode;
+    data_pos.* += 1;
+    const flags = if (is_full) @as(u8, 0x00) else @as(u8, 0x80);
+    buffer[data_pos.*] = flags;
+    data_pos.* += 1;
+    write7BitEncodedIntDirect(buffer, data_pos, reps);
+    write7BitEncodedIntDirect(buffer, data_pos, unit);
+    if (!is_full) {
+        write7BitEncodedIntDirect(buffer, data_pos, @as(usize, @intCast(msk)));
+    }
+
+    const data_len = changed * (if (is_uniform) @as(usize, 1) else reps);
+    if (data_len > temp_buffer.len) @panic("temp buffer too small for motif data");
+    if (is_full) {
+        @memcpy(temp_buffer[0..data_len], xor_data[acc.start_pos .. acc.start_pos + data_len]);
+    } else {
+        var pp: usize = 0;
+        var ii: usize = 0;
+        while (ii < unit) : (ii += 1) {
+            if ((msk & bit_masks[ii]) != 0) {
+                pos_list[pp] = ii;
+                pp += 1;
             }
         }
-        // fallback basic RLE
+        var cursor: usize = 0;
+        const max_rr = if (is_uniform) @as(usize, 1) else reps;
+        var rr: usize = 0;
+        while (rr < max_rr) : (rr += 1) {
+            var jj: usize = 0;
+            while (jj < changed) : (jj += 1) {
+                const local_pos = pos_list[jj];
+                temp_buffer[cursor] = xor_data[acc.start_pos + rr * unit + local_pos];
+                cursor += 1;
+            }
+        }
+    }
+    @memcpy(buffer[data_pos.*..data_pos.* + data_len], temp_buffer[0..data_len]);
+    data_pos.* += data_len;
+
+    // Update counts (mirrors C#: AverageMaskDensity updated with acc.Density).
+    const density = acc.density;
+    const total_motif = counts.uniform_motif_count + counts.varying_motif_count + 1;
+    const new_avg = (counts.average_mask_density * @as(f32, @floatFromInt(total_motif - 1)) + density) / @as(f32, @floatFromInt(total_motif));
+    if (is_uniform) {
+        counts.uniform_motif_count += 1;
+    } else {
+        counts.varying_motif_count += 1;
+    }
+    counts.average_mask_density = new_avg;
+}
+
+// Mirrors C# Encoder.cs EncodeXorWithMotifs: a stateful accumulator that extends a
+// motif one unit at a time and emits it only when it can no longer be extended.
+fn encodeXorWithMotifsDirect(xor_data: []const u8, buffer: []u8, data_pos: *usize, options: utils.Options, counts: *utils.OpCodeCounts) void {
+    var temp_buffer: [4096]u8 = undefined;
+    var pos: usize = 0;
+    var acc = MotifAccumulator{};
+    acc.reset();
+
+    const motifs_enabled = options.enable_motif_detection;
+
+    while (pos < xor_data.len) {
+        // Try to extend the current motif.
+        if (motifs_enabled and acc.active and acc.tryExtend(xor_data)) {
+            pos += acc.unit_size;
+            continue;
+        }
+
+        // Check if the current motif should be emitted.
+        if (acc.active and acc.shouldEmit(xor_data)) {
+            emitMotif(&acc, xor_data, buffer, data_pos, counts);
+            pos = acc.start_pos + acc.coveredLength();
+            acc.reset();
+            continue;
+        }
+
+        // Reset accumulator if not extended or not emitting.
+        if (acc.active) {
+            acc.reset();
+        }
+
+        // Try to start a new motif.
+        if (motifs_enabled and acc.tryStart(xor_data, pos)) {
+            pos += acc.unit_size;
+            continue;
+        }
+
+        // Fallback to a basic RLE run.
         const is_zero = xor_data[pos] == 0;
         var run_len: usize = 1;
         while (pos + run_len < xor_data.len and (xor_data[pos + run_len] == 0) == is_zero) run_len += 1;
-            const opcode = if (is_zero) utils.RLE_ZERO_RUN else utils.RLE_NON_ZERO_RUN;
+        const opcode = if (is_zero) utils.RLE_ZERO_RUN else utils.RLE_NON_ZERO_RUN;
         buffer[data_pos.*] = opcode;
         data_pos.* += 1;
         write7BitEncodedIntDirect(buffer, data_pos, run_len);
         if (!is_zero) {
             if (run_len > temp_buffer.len) @panic("temp buffer too small for run data");
-            @memcpy(temp_buffer[0..run_len], xor_data[pos..pos + run_len]);
+            @memcpy(temp_buffer[0..run_len], xor_data[pos .. pos + run_len]);
             @memcpy(buffer[data_pos.*..data_pos.* + run_len], temp_buffer[0..run_len]);
             data_pos.* += run_len;
         }
@@ -117,6 +297,11 @@ fn encodeXorWithMotifsDirect(xor_data: []const u8, buffer: []u8, data_pos: *usiz
             counts.non_zero_run_count += 1;
         }
         pos += run_len;
+    }
+
+    // Emit any remaining motif (mirrors C# trailing ShouldEmit check).
+    if (acc.active and acc.shouldEmit(xor_data)) {
+        emitMotif(&acc, xor_data, buffer, data_pos, counts);
     }
 }
 
@@ -283,99 +468,4 @@ fn checkUniform(xor_data: []const u8, start: usize, unit: usize, msk: u32, reps:
         }
     }
     return true;
-}
-
-fn findMotifCandidate(xor_data: []const u8, start_pos: usize, options: utils.Options) ?MotifCandidate {
-    _ = options;
-    const len = xor_data.len - start_pos;
-    var u: usize = 0;
-    while (u < motif_probe_count) : (u += 1) {
-        const unit_size = motif_unit_sizes[u];
-        const max_possible_repeat = len / unit_size;
-        if (max_possible_repeat < motif_min_streak) continue;
-
-        var mask: u32 = 0;
-        var pop: usize = 0;
-        var ii: usize = 0;
-        while (ii < unit_size) : (ii += 1) {
-            if (xor_data[start_pos + ii] != 0) {
-                mask |= bit_masks[ii];
-                pop += 1;
-            }
-        }
-        if (pop == 0) continue;
-
-        const is_full = pop == unit_size;
-        const density = if (unit_size > 0) @as(f32, @floatFromInt(pop)) / @as(f32, @floatFromInt(unit_size)) else 0.0;
-        if (!is_full and density >= motif_density_threshold) continue;
-
-        var repeat_len: usize = 1;
-        var is_uniform: bool = undefined;
-
-        if (is_full) {
-            // full mode
-            const first_unit_start = start_pos;
-            const first_unit_end = start_pos + unit_size;
-            var r: usize = 1;
-            while (r < max_possible_repeat) : (r += 1) {
-                const this_start = start_pos + r * unit_size;
-                const this_end = this_start + unit_size;
-                if (this_end > xor_data.len) break;
-                if (!std.mem.eql(u8, xor_data[this_start..this_end], xor_data[first_unit_start..first_unit_end])) break;
-                repeat_len += 1;
-            }
-            repeat_len = @min(repeat_len, max_motif_streak);
-            is_uniform = true;
-        } else {
-            // masked mode
-            var r: usize = 1;
-            while (r < max_possible_repeat) : (r += 1) {
-                var matches = true;
-                var i: usize = 0;
-                while (i < unit_size) : (i += 1) {
-                    const val = xor_data[start_pos + r * unit_size + i];
-                    const bit = bit_masks[i];
-                    if ((mask & bit) != 0) {
-                        if (val == 0) {
-                            matches = false;
-                            break;
-                        }
-                    } else {
-                        if (val != 0) {
-                            matches = false;
-                            break;
-                        }
-                    }
-                }
-                if (!matches) break;
-                repeat_len += 1;
-            }
-            repeat_len = @min(repeat_len, max_motif_streak);
-            is_uniform = checkUniform(xor_data, start_pos, unit_size, mask, repeat_len);
-        }
-
-        if (repeat_len < motif_min_streak) continue;
-
-        const covered = repeat_len * unit_size;
-        var header_size: usize = 1 + 1 + get7BitEncodedSize(repeat_len) + get7BitEncodedSize(unit_size);
-        const changed_count = if (is_full) unit_size else pop;
-        if (!is_full) {
-            header_size += get7BitEncodedSize(@as(usize, @intCast(mask)));
-        }
-        const data_size = changed_count * (if (is_uniform) 1 else repeat_len);
-        const motif_size = header_size + data_size;
-        const rle_size = estimateRLESizeForSpan(xor_data[start_pos..start_pos + covered]);
-        const savings = if (rle_size > 0) (@as(f32, @floatFromInt(rle_size)) - @as(f32, @floatFromInt(motif_size))) / @as(f32, @floatFromInt(rle_size)) else 0.0;
-        if (savings > motif_savings_threshold) {
-            return MotifCandidate{
-                .unit_size = unit_size,
-                .repeat_length = repeat_len,
-                .covered_length = covered,
-                .mask = mask,
-                .is_uniform = is_uniform,
-                .is_full = is_full,
-            };
-        }
-    }
-    return null;
 }
