@@ -148,3 +148,71 @@ asserts the C# delta is byte-identical to Zig's `createDelta`, plus apply + roun
 RunArithmetic (0x0B) per-run + clamp-aware BOTH implemented losslessly; nothing descoped. Tests
 PerRun/RunArithmetic/Clamp un-skipped and passing. C# authoritative, Zig byte-for-byte mirror.
 Bounded to the per-run/clamp path; 0x00-0x0A emit/decode untouched.
+
+## Cross-kind audit (codex on claude impl)
+
+### A. Clamp losslessness
+
+APPROVED. The C# encoder emits clamp-mode 0x0B only through `TryScanArithmeticRun`, which first
+derives a signed clamp step and then extends the candidate run with a per-byte predicate:
+`newData[start + len] == ClampAdd(oldData[start + len], derived)`. The emitted `runLen` is exactly
+the contiguous prefix verified by that predicate, so a near-but-not-exact clamp sequence stops before
+the violating byte and is not emitted as part of the clamp run. The same logic is mirrored in Zig
+with `new_data[start + len] == clampAdd(old_data[start + len], derived)`.
+
+Decode is forward replay, not inversion. Both decoders prefill output from old data, then process
+opcodes monotonically by `pos`. The 0x0B clamp loop reads and writes `output[pos + k]` once per byte;
+an earlier byte write cannot affect a later byte read. Because the encoder verified every emitted
+byte against `clamp(old+step)`, replaying the same deterministic function on the still-old byte
+reconstructs the exact new byte.
+
+The signed-step and clamp range are consistent: C# uses `(sbyte)step` and `int r = output[pos+k] + s`
+with clamp to `[0,255]`; Zig uses `@bitCast(step)` to `i8`, promotes to `i32`, and clamps to the same
+range. Boundary cases therefore replay exactly: `250+10 -> 255`, `255+10 -> 255`, `5-10 -> 0`, and
+`0-10 -> 0`.
+
+### B. Detection and gate soundness
+
+APPROVED. Wrap runs require every byte in the emitted prefix to have the same modulo-256 difference.
+Clamp runs require every byte in the emitted prefix to equal `clamp(old+(i8)step)`. `ScanFiller`
+advances until the next position that can start a qualifying arithmetic run, and filler bytes are
+encoded through the existing ZeroRun/NonZeroRun XOR structure. `TryEmitRunArithmetic` sizes the full
+segmented plan first, requires at least one 0x0B run, and emits only when `planSize` is strictly less
+than `EstimateXorRleSizeWholeRegion`.
+
+Probe order is correct: GlobalArithmetic 0x09 and PlanarArithmetic 0x0A run first and return before
+0x0B, so whole-region progressions remain claimed by the older whole-region opcodes when they win.
+The 0x0B path is a fallback before XOR/motif, not a change to 0x00-0x0A decode behavior.
+
+### C. C# to Zig faithfulness
+
+APPROVED. The opcode number, framing, and flags match: `[0x0B][flags][step][runLen:7bit]`,
+`flags & 0x01` means clamp, and reserved flag bits are rejected by both decoders. Wrap arithmetic is
+byte modulo addition in both languages: C# unchecked byte casts and Zig `+%` / `-%`. Clamp arithmetic
+is signed i8 in both languages: C# `(sbyte)` / `(byte)cStep`, Zig `@bitCast`, with identical `i32`
+promotion and `[0,255]` clamp. The run scanner, clamp-step derivation, filler sizing/emission, and
+strict gate are mirrored structurally between `Encoder.cs` and `encoder.zig`.
+
+### D. Scope and no papering
+
+APPROVED. The diff is bounded to the new 0x0B encode/decode/constants/counts path, the Zig mirror,
+the un-skipped arithmetic tests, Test055/Test056 generation, and this execution log. Existing
+0x00-0x0A decode paths are not repurposed. `PerRunArithmetic`, `RunArithmeticOpcode`, and
+`ClampAwareDetection` are real `[Fact]` tests with round-trip assertions, not weakened placeholders;
+`AutoModeSelection` remains skipped as TASK-0366 scope. `SevenBitEncoding_LargeNumbers` adding
+`EnableArithmeticDetection=false` is legitimate test isolation: it already disabled motifs to assert
+the baseline ZeroRun/NonZeroRun breakdown, and a 150-byte all-`+1` change is now a valid 0x0B win.
+
+### E. Independent re-run
+
+NOT RERUN BY CODEX. Per the audit brief, I relied on the orchestrator-confirmed clean runs: C#
+`116 passed / 0 failed / 5 skipped` with `--no-restore`, and Zig 0.15.1 `zig build test` after clean
+`testdata` / `.zig-cache`, `EXIT=0`, all 56 vectors create/apply/round-trip byte-parity and leak-free.
+No restoring `dotnet` command was run during this audit.
+
+### VERDICT
+
+APPROVED. RunArithmetic 0x0B and the lossless clamp variant are sound. The encode-side full-prefix
+verification plus decode-side forward replay proves clamp does not need to be invertible, and C# and
+Zig agree on opcode framing, signed-step interpretation, wraparound arithmetic, clamp range, and gate
+semantics. Orchestrator may merge `task-0365-per-run-arithmetic` to `master` and close TASK-0365.
