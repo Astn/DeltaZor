@@ -151,3 +151,217 @@ ZeroRun then FloatRun.
   runs, no existing vector regressed, FloatRun is a gated strict improvement.
 </content>
 </invoke>
+
+## Cross-kind audit (codex on claude impl)
+
+### STOP / command evidence
+
+Commands run from `C:\Users\austi\src\DeltaZor`:
+
+```text
+> git rev-parse HEAD
+e5c886725fcb7911c38ad2b30a77c73dfd557f17
+
+> git branch --show-current
+task-0361-floatrun-0x06
+
+> git status --short
+<no output>
+```
+
+The branch and HEAD match the requested target (`task-0361-floatrun-0x06`, `e5c8867`), and
+the worktree was clean before this audit append.
+
+Touched-file evidence:
+
+```text
+> git diff --name-only HEAD^ HEAD
+docs/develop/2026-05-28_task-0361-floatrun-0x06-execution.md
+src/csharp/DeltaZor.TestGen/Program.cs
+src/csharp/DeltaZor.TestGen/TestCases/Test046_FloatRun_Stride12_f32.cs
+src/csharp/DeltaZor/Decoder.cs
+src/csharp/DeltaZor/Encoder.cs
+src/csharp/DeltaZorTests/UnitTests/MotifRepeatTests.cs
+src/zig/src/decoder.zig
+src/zig/src/encoder.zig
+src/zig/src/utils.zig
+```
+
+### A. Zig FloatRun faithfulness to C# authoritative path
+
+Static result: C# and Zig are byte-faithful for the implemented FloatRun algorithm.
+
+Command evidence used:
+
+```text
+> rg -n "TryEmitFloatRun|FloatRun|FloatPatternCount|0x06" src -S
+src/zig/src/decoder.zig:199:                    utils.RLE_FLOAT_RUN => { // float run 0x06
+src/zig/src/encoder.zig:289:        if (tryEmitFloatRun(xor_data, pos, buffer, data_pos, counts, &float_covered)) {
+src/zig/src/encoder.zig:333:fn tryEmitFloatRun(...)
+src/csharp/DeltaZor/Encoder.cs:343:            if (TryEmitFloatRun(xorData, pos, writer, tempBuffer, ref counts, out int floatCovered))
+src/csharp/DeltaZor/Encoder.cs:452:    private static bool TryEmitFloatRun(...)
+src/csharp/DeltaZor/Decoder.cs:158:                case DeltaUtils.RLE_FloatRun:
+```
+
+Side-by-side read:
+
+- Fallback order matches: both probe FloatRun only after motif extension/emission reset and
+  after motif `TryStart` fails (`Encoder.cs:332-347`, `encoder.zig:279-292`).
+- Alignment matches: both reject `(pos & 3) != 0`.
+- Leading-lane requirement matches: both reject if lane 0 at `pos` has no changed byte.
+- Trailing trim matches: both scan all remaining whole lanes, set `laneCount = lastChanged + 1`,
+  and reject `laneCount < 2`.
+- Size arithmetic matches: `1 + 1 + get7BitEncodedSize(laneCount) + ceil(laneCount/8) +
+  4 * changedLanes`, strict reject on `floatSize >= rleSize`.
+- Varint implementation matches existing 7-bit little-endian continuation encoding
+  (`Utils.cs:250-261`, `utils.zig:58-67`).
+- Bitmap layout matches: LSB-first per byte, `bitmap[l >> 3] |= 1 << (l & 7)` in both
+  encoders and the same test in both decoders.
+- Packed-lane order matches: changed lanes are copied in ascending lane order, 4 bytes per
+  changed lane.
+
+Test046 local artifact sanity:
+
+```text
+> Format-Hex -Path src/zig/testdata/test046.delta.bin -Count 96
+0000000000000000 00 0C 00 00 00 00 08 06 00 FE 05 49 92 24 49 92
+...
+```
+
+This decodes as header length 3072, RLE, `00 08` ZeroRun, then `06 00 FE 05` FloatRun
+with flags 0 and laneCount 766. This matches the described Test046 framing. The local
+`src/zig/testdata` directory is ignored (`git status --short --ignored ...` reported
+`!! src/zig/testdata/`), but `src/zig/build.zig:46-68` regenerates it before Zig tests.
+
+### B. Savings-gate soundness + regression fix
+
+Static result: REJECTING issue found. The C# and Zig algorithms are faithful to each other,
+but the trigger is not a sound strict-improvement gate against the full existing encoder.
+
+The current fix prevents the exact test015 shape where a leading zero lane let FloatRun
+start before a downstream motif. It does not prevent a changed first lane followed by an
+internal zero gap and then a motif-able region. Because `TryEmitFloatRun` scans to the last
+changed lane in the remaining XOR buffer, it can still swallow a later motif even though
+motif `TryStart` failed only at the original `pos`.
+
+Concrete adversarial XOR shape:
+
+```text
+bytes 0..3:     01 00 00 00        ; first lane changed, motif TryStart fails at pos 0
+bytes 4..15:    00 ... 00          ; three zero lanes
+bytes 16..415:  repeated 100 times: AA 00 00 00
+```
+
+Current FloatRun at `pos = 0`:
+
+```text
+laneCount = 104
+changedLanes = 101
+bitmapBytes = ceil(104 / 8) = 13
+floatSize = 1 + 1 + 1 + 13 + (4 * 101) = 420
+byte-RLE over same 416-byte span = 3 + 2 + 100 * (3 + 2) = 505
+```
+
+Since `420 < 505`, both C# and Zig emit FloatRun.
+
+But the pre-FloatRun encoder path over the same data is much smaller:
+
+```text
+pos 0:  NonZeroRun len 1 = 3 bytes
+pos 1:  ZeroRun len 15 = 2 bytes
+pos 16: Uniform motif, unitSize 4, mask 1, repeatLength 100 = 6 bytes
+total = 11 bytes
+```
+
+The motif starts at `pos = 16`, not `pos = 0`, so the current "after TryStart fails"
+ordering does not protect it. This is the same class of regression as the no-papering note
+(maximal FloatRun swallowing a downstream motif), only with a changed first lane instead of
+a leading zero lane. It is not C#<->Zig parity divergence; it is a shared greedy-selection
+bug that the current corpus does not exercise.
+
+The gate is therefore strict only versus byte-RLE, not versus the existing motif/RLE
+encoder alternative. FloatRun is not yet a guaranteed strict-improvement opcode.
+
+Recommended fix direction: before emitting a maximal FloatRun, either cap the candidate
+before the first downstream motif-start position, or compare against the actual motif/RLE
+cost over the candidate span rather than byte-RLE alone.
+
+### C. Decode correctness + round-trip
+
+Static result: decode is correct for encoder-produced FloatRun streams.
+
+Both decoders:
+
+- require flags `0x00`;
+- require `laneCount >= 2`;
+- compute span as `laneCount * 4` and bounds-check against output length;
+- read `ceil(laneCount/8)` bitmap bytes;
+- walk lanes in ascending order;
+- leave clear bitmap lanes unchanged, which is correct because the output is preloaded with
+  old data and clear lanes mean zero XOR;
+- XOR exactly four packed bytes for each set lane;
+- advance `pos += laneCount * 4`.
+
+The orchestrator-confirmed round-trip coverage is accepted here: C# `100 passed / 0 failed /
+10 skipped`; Zig `EXIT=0`, all 45 active create-delta vectors byte-identical plus
+round-trip exact, including Test046. I did not rerun tests.
+
+### D. Scope + anti-papering
+
+Static result: scope is bounded as requested, but the strict-improvement claim is not.
+
+Command evidence:
+
+```text
+> git diff --stat HEAD^ HEAD
+9 files changed, 454 insertions(+), 4 deletions(-)
+```
+
+The source changes are limited to the expected C# encoder/decoder, Zig encoder/decoder/utils,
+TestGen registration and Test046, one MotifRepeatTests assertion, and the execution log. I
+found no implementation of 0x07/0x08/0x09/0x0A and no decode-path rewrite for existing
+opcodes:
+
+```text
+> rg -n "RLE_HalfRun|RLE_ChannelRun|RLE_Arithmetic|RLE_Planar|0x07|0x08|0x09|0x0A|RLE_HALF|RLE_CHANNEL|RLE_ARITH|RLE_PLANAR" src/csharp/DeltaZor src/zig/src -S
+src/csharp/DeltaZor/DeltaZor.cs:122:        public int HalfPatternCount { get; set; } // 0x07 (Planned)
+src/csharp/DeltaZor/DeltaZor.cs:123:        public int ChannelRunCount { get; set; } // 0x08 (Planned)
+src/csharp/DeltaZor/Utils.cs:53:        RLE_HalfRun =
+src/csharp/DeltaZor/Utils.cs:57:        RLE_ChannelRun =
+src/csharp/DeltaZor/Utils.cs:61:        RLE_Arithmetic =
+src/csharp/DeltaZor/Utils.cs:65:        RLE_Planar =
+```
+
+`MotifRepeatTests` changed a broad "some RLE-stream pattern count exists" assertion from
+Zero/NonZero-only to Zero/NonZero/Float. That is a legitimate broadening for that test; it
+does not assert motif behavior specifically, and it still requires RLE and compression type
+`"RLE"`.
+
+Test046 is a real corpus case in TestGen (`Program.cs:217-218`) with `ExpectedDeltaSize =>
+1131`, and the ignored regenerated corpus present locally has manifest `testId: 46`,
+`deltaSize: 1131`, and real base/next/delta files. `build.zig` still always regenerates the
+corpus from the current C# encoder before Zig tests (`src/zig/build.zig:46-68`).
+
+### E. Independent re-run
+
+I did not run `dotnet test`, `dotnet build`, or Zig. Per the audit instructions, I relied on
+the orchestrator-confirmed dynamic results:
+
+```text
+C#: dotnet test src/csharp/DeltaZorTests/DeltaZorTests.csproj --no-restore -m:1
+    100 passed / 0 failed / 10 skipped, EXIT 0
+
+Zig 0.15.1 build test:
+    EXIT=0, 45 active create-delta vectors byte-identical C#<->Zig plus exact round-trip,
+    Test046 included, test008 excluded as pre-existing
+```
+
+### VERDICT
+
+REJECTED.
+
+FloatRun 0x06 appears byte-faithful between C# and Zig for the implemented algorithm, and
+the 0x06 decoder reconstructs encoder-produced streams correctly. However, the savings gate
+is still not sound as a strict-improvement opcode: a changed first lane can cause maximal
+FloatRun to swallow a later motif-able region and regress size badly. This violates the
+TASK-0361/EPIC-0045 requirement that FloatRun be a strict improvement or a no-op.
