@@ -39,6 +39,28 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(lib);
 
+    // Cross-compile + WASM (TASK-0370). The static lib above already cross-compiles to every
+    // -Dtarget the matrix needs (x86_64/aarch64 linux/macos/windows) because the source is
+    // pure-Zig/allocator-based — no OS syscalls. For WASM, a `.a` archive is NOT a usable
+    // module, so when the resolved target is a wasm arch we ALSO emit an executable reactor
+    // (`deltazor.wasm`) whose exports come from src/wasm.zig. `zig build -Dtarget=wasm32-*`
+    // then produces zig-out/bin/deltazor.wasm; native targets are unaffected.
+    if (target.result.cpu.arch.isWasm()) {
+        const wasm = b.addExecutable(.{
+            .name = "deltazor",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/wasm.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        // Reactor module (no _start entry): exports stay callable, no main() required.
+        wasm.entry = .disabled;
+        // Surface the explicit `export fn` ABI symbols to the host.
+        wasm.rdynamic = true;
+        b.installArtifact(wasm);
+    }
+
     // Step to generate and copy test data if needed (single chained command)
     const generate_testdata = b.addSystemCommand(&[_][]const u8{
         "cmd",

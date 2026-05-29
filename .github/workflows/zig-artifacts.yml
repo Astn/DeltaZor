@@ -1,0 +1,52 @@
+name: Zig Cross-Compile Artifacts
+
+# Tag-driven ONLY (mirrors publish.yml / TASK-0369). Push/PR test-gating is TASK-0372 and is
+# blocked on the dual-default-branch decision (TASK-0373) — do NOT add push/pull_request here.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  cross-compile:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-linux
+          - aarch64-linux
+          - x86_64-windows
+          - aarch64-macos
+          - x86_64-macos
+          - wasm32-wasi
+          - wasm32-freestanding
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Pin the EXACT toolchain used to verify this matrix locally (TASK-0370).
+      - name: Setup Zig 0.15.1
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.1
+
+      - name: Cross-compile ${{ matrix.target }}
+        working-directory: src/zig
+        # ReleaseSafe for native libs; the wasm reactor (src/wasm.zig) is emitted automatically
+        # when the target arch is wasm (see build.zig). build.zig regenerates the C# corpus only
+        # for the `test` step, not for `build`, so cross-builds need no .NET here.
+        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
+
+      - name: Upload ${{ matrix.target }} artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deltazor-${{ matrix.target }}
+          path: |
+            src/zig/zig-out/lib/*
+            src/zig/zig-out/bin/*
+          if-no-files-found: error
