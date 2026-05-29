@@ -64,3 +64,25 @@ WASM sanity: `\0asm` magic header confirmed (`head -c4 | xxd` → `0061 736d`); 
 ## Pre-commit hygiene
 
 `.zig-cache/` and `zig-out/` removed before commit. Staged source-only with explicit `git add` (build.zig, src/wasm.zig, workflow, this exec log). No build artifacts, no testdata regen committed. NOT pushed.
+
+## Cross-kind audit (codex on claude impl)
+
+### A. build.zig cross-compile + wasm gating
+
+APPROVED. `src/zig/build.zig` still uses `b.standardTargetOptions(.{})` and the existing static lib install remains the default non-wasm build path. The new reactor artifact is gated solely by `if (target.result.cpu.arch.isWasm())`, so native targets do not import `src/wasm.zig` or install the executable artifact. The test/corpus path remains unchanged: `generate-testdata` is only a dependency of the `test` step through `run_tests`, not the default `zig build` install path.
+
+### B. wasm.zig C-ABI correctness
+
+APPROVED. `src/zig/src/wasm.zig` is a thin adapter over `DeltaZor.createDelta` and `DeltaZor.applyDelta`; it does not reimplement codec logic. `dz_alloc` and `dz_free` both use `std.heap.wasm_allocator`, and the ABI carries the slice length required for the caller to free buffers correctly. `dz_create_delta` returns a fresh pointer and writes the delta length through `out_len`, which gives JS/wasm hosts the missing result length needed to copy/free the returned buffer. `dz_apply_delta` accepts caller-provided output ptr/len and forwards to the native contract; the delta format itself carries decoded output length and the decoder rejects undersized output. No double-free, use-after-free, missing export, or wasm32 integer-truncation issue found in the adapter surface.
+
+### C. Workflow correctness
+
+APPROVED. `.github/workflows/zig-artifacts.yml` triggers only on `push` tags matching `v*`, with no branch `push` or `pull_request` trigger. The matrix contains all 7 targets: x86_64-linux, aarch64-linux, x86_64-windows, aarch64-macos, x86_64-macos, wasm32-wasi, and wasm32-freestanding. Zig is pinned to 0.15.1 via `mlugg/setup-zig@v2`, artifacts are uploaded with `actions/upload-artifact@v4`, the upload paths match `src/zig/zig-out/lib/*` and `src/zig/zig-out/bin/*`, and no hardcoded secrets are present.
+
+### D. Byte-parity + scope
+
+APPROVED. The parity tests continue to import and exercise `deltazor.zig` directly, while `wasm.zig` is only compiled for wasm reactor artifacts. The diff is bounded to the expected 4 files: build.zig, wasm.zig, the tag-only workflow, and this execution log. No codec core files were modified, so C# <-> Zig byte-parity remains untouched by this task.
+
+### VERDICT
+
+APPROVED. The cross-compile matrix and wasm C-ABI are statically correct and memory-safe under the documented host contract; the workflow is tag-only and independent of TASK-0373; byte-parity is untouched. Orchestrator may merge `task-0370-zig-crosscompile-wasm` to `master` and close TASK-0370.
